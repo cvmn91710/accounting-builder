@@ -1,0 +1,443 @@
+{
+  "schedules": {
+    "A": {
+      "sheet": "Sch_A",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "B": {
+      "sheet": "Sch_B",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "C": {
+      "sheet": "Sch_C",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "D": {
+      "sheet": "Sch_D",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "E": {
+      "sheet": "Sch_E",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "F": {
+      "sheet": "Sch_F",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "G": {
+      "sheet": "Sch_G",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "H": {
+      "sheet": "Sch_H",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "I": {
+      "sheet": "Sch_I",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    }
+  },
+  "probate_estate": {
+    "A": {
+      "sheet": "Sch_A",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "B": {
+      "sheet": "Sch_B",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "C": {
+      "sheet": "Sch_C",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "D": {
+      "sheet": "Sch_D",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "E": {
+      "sheet": "Sch_E",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "F": {
+      "sheet": "Sch_F",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "G": {
+      "sheet": "Sch_G",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "H": {
+      "sheet": "Sch_H",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "I": {
+      "sheet": "Sch_I",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    }
+  },
+  "conservatorship": {
+    "A": {
+      "sheet": "Sch_A",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "B": {
+      "sheet": "Sch_B",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "C": {
+      "sheet": "Sch_C",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "D": {
+      "sheet": "Sch_D",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "E": {
+      "sheet": "Sch_E",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "F": {
+      "sheet": "Sch_F",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "G": {
+      "sheet": "Sch_G",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "H": {
+      "sheet": "Sch_H",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "I": {
+      "sheet": "Sch_I",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    }
+  },
+  "trust_administration": {
+    "A": {
+      "sheet": "Sch_A",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "B": {
+      "sheet": "Sch_B",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "C": {
+      "sheet": "Sch_C",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "D": {
+      "sheet": "Sch_D",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "E": {
+      "sheet": "Sch_E",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "F": {
+      "sheet": "Sch_F",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "G": {
+      "sheet": "Sch_G",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "H": {
+      "sheet": "Sch_H",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    },
+    "I": {
+      "sheet": "Sch_I",
+      "first_data_row": 4,
+      "columns": {
+        "date": "A",
+        "description": "B",
+        "amount": "C",
+        "payee": "D",
+        "category": "E",
+        "notes": "F"
+      }
+    }
+  },
+  "matter_metadata_cells": {}
+}
