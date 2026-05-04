@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Allow `import app` when the Streamlit entrypoint is app/streamlit_app.py (script dir is /app/app)
+ENV PYTHONPATH=/app
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

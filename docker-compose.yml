@@ -5,6 +5,8 @@ services:
       - "8501:8501"
     env_file:
       - .env
+    environment:
+      PYTHONPATH: /app
     volumes:
       - ./data:/app/data
       - ./templates:/app/templates

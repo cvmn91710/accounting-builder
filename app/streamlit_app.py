@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Streamlit puts the script's directory on sys.path, not the project root, so `import app` fails in Docker/Coolify unless PYTHONPATH is set. Ensure repo root is importable.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import base64
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Optional
 
 import streamlit as st
