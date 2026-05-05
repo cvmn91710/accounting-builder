@@ -10,7 +10,17 @@ from typing import Any
 import google.generativeai as genai
 
 from app.config import get_settings
+from app.debug_agent_log import agent_debug_log
 from app.models import ExtractionResult
+
+
+def _google_genai_package_version() -> str:
+    try:
+        from importlib import metadata
+
+        return metadata.version("google-generativeai")
+    except Exception:
+        return "unknown"
 
 
 EXTRACTION_PROMPT_HEADER = """You are a financial document analyst. Extract structured data from the bank/brokerage/credit card/retirement statement text below.
@@ -89,14 +99,42 @@ def extract_statement_with_gemini(combined_text: str, tables_text: str) -> Extra
         + ("\n\nTABLES:\n" + tables_text[:200_000] if tables_text else "")
     )
 
-    response = model.generate_content(
-        body,
-        generation_config=genai.types.GenerationConfig(
-            temperature=0,
-            max_output_tokens=8192,
-            response_mime_type="application/json",
-        ),
+    # #region agent log
+    agent_debug_log(
+        "gemini_extractor.py:extract_statement_with_gemini",
+        "pre_generate_content",
+        {
+            "resolved_gemini_model": settings.gemini_model,
+            "google_generativeai_version": _google_genai_package_version(),
+            "api_key_configured": bool(settings.gemini_api_key),
+            "prompt_body_chars": len(body),
+        },
+        "H1",
     )
+    # #endregion
+
+    # #region agent log
+    try:
+        response = model.generate_content(
+            body,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
+            ),
+        )
+    except Exception as e:
+        agent_debug_log(
+            "gemini_extractor.py:extract_statement_with_gemini",
+            "generate_content_exception",
+            {
+                "error_type": type(e).__name__,
+                "error_message": str(e)[:4000],
+            },
+            "H2",
+        )
+        raise
+    # #endregion
     raw = response.text or "{}"
     raw = _strip_json_fence(raw)
     data = json.loads(raw)
