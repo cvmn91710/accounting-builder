@@ -25,7 +25,9 @@ def _google_genai_package_version() -> str:
 
 EXTRACTION_PROMPT_HEADER = """You are a financial document analyst. Extract structured data from the bank/brokerage/credit card/retirement statement below.
 
-Priority: The TABLES section (if present) is the authoritative source for transaction rows — use it first, then the full-page text for anything missing.
+Where to read transactions:
+- If TABLES contains a large grid of dated transaction rows, use it as the primary source.
+- If TABLES is short or only shows fees/summaries/checkboxes, ignore it for line items — extract EVERY transaction from the FULL PAGE TEXT section (e.g. Wells Fargo "Transaction history" printed as flowing text with dates and amounts).
 
 Rules:
 - Identify financial institution, account type, last 4 digits of account number only, and statement period (start/end dates).
@@ -80,6 +82,19 @@ def _strip_json_fence(raw: str) -> str:
     return s.strip()
 
 
+def _tables_likely_full_ledger(tables_text: str) -> bool:
+    """Heuristic: pdfplumber often misses the real history table; small snippets are not the ledger."""
+    if not tables_text or not tables_text.strip():
+        return False
+    lines = [ln for ln in tables_text.splitlines() if ln.strip()]
+    if len(lines) < 18:
+        return False
+    pipe_rows = sum(
+        1 for ln in lines if "|" in ln and ln.count("|") >= 3
+    )
+    return pipe_rows >= 10
+
+
 def _coerce_extraction_dict(data: dict[str, Any]) -> dict[str, Any]:
     """Normalize keys for Pydantic."""
     txns = data.get("transactions") or []
@@ -101,14 +116,16 @@ def extract_statement_with_gemini(combined_text: str, tables_text: str) -> Extra
     model = genai.GenerativeModel(settings.gemini_model)
 
     tables_part = (
-        "\n\n=== TABLES (extract every data row into transactions[]) ===\n\n" + tables_text[:400_000]
+        "\n\n=== TABLES (structured extracts; may be incomplete) ===\n\n"
+        + tables_text[:400_000]
         if tables_text
         else ""
     )
-    text_part = (
-        "\n\n=== FULL PAGE TEXT ===\n\n" + combined_text[:900_000]
-    )
-    body = EXTRACTION_PROMPT_HEADER + tables_part + text_part
+    text_part = "\n\n=== FULL PAGE TEXT ===\n\n" + combined_text[:900_000]
+    if tables_text and _tables_likely_full_ledger(tables_text):
+        body = EXTRACTION_PROMPT_HEADER + tables_part + text_part
+    else:
+        body = EXTRACTION_PROMPT_HEADER + text_part + tables_part
 
     # #region agent log
     agent_debug_log(
