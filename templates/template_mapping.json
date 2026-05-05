@@ -11,7 +11,7 @@
     "Schedule C grand total formula at F98 currently omits Miscellaneous. When Miscellaneous data is populated, the app must add F<misc-total-row> to the F98 formula.",
     "The 'Insert name of Vendor' placeholder rows above each subcategory's column headers are vendor-grouping markers that staff use to organize transactions by payee. The app may insert vendor-name rows between the column-header row and the data, or just leave the placeholder and start writing data in the row beneath the column-header row."
   ],
-  "templatePath": "templates/2290_Accounting_Template.xlsx",
+  "templatePath": "templates/2290-Accounting Template.xlsx",
   "sheets": {
     "workingBalance": {
       "sheet": "Working Balance",

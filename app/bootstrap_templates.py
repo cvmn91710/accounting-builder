@@ -13,7 +13,7 @@ from app.config import get_settings
 def _minimal_mapping_v12() -> dict:
     """Starter mapping — verify row/column indices against the live doc 2290 template before production."""
     return {
-        "templatePath": "templates/2290_Accounting_Template.xlsx",
+        "templatePath": "templates/2290-Accounting Template.xlsx",
         "sheets": {
             "workingBalance": {
                 "sheet": "Working Balance",

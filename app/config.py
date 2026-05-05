@@ -40,9 +40,9 @@ class Settings(BaseSettings):
     )
 
     template_path: Path = Field(
-        default=Path("templates/2290_Accounting_Template.xlsx"),
+        default=Path("templates/2290-Accounting Template.xlsx"),
         validation_alias="TEMPLATE_PATH",
-        description="Single master Excel template (doc 2290) for all matter types — v1.2 spec.",
+        description="Single master Excel template (doc 2290). Must be the full firm workbook, not the minimal dev stub.",
     )
     template_mapping_path: Path = Field(
         default=Path("templates/template_mapping.json"),

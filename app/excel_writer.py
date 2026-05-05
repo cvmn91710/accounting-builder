@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +21,21 @@ from app.template_config import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _warn_if_placeholder_master_workbook(wb: Workbook, template_path: Path) -> None:
+    """The repo used to ship a tiny stub named like the real doc 2290 file — catch mistaken loads."""
+    if "Working Balance" not in wb.sheetnames:
+        return
+    ws = wb["Working Balance"]
+    if (ws.max_row or 0) <= 8 and (ws.max_column or 0) <= 4:
+        warnings.warn(
+            f"The workbook at {template_path} looks like a minimal stub (Working Balance is "
+            f"{ws.max_row}x{ws.max_column}). Use the full firm file "
+            f"'2290-Accounting Template.xlsx' and set TEMPLATE_PATH accordingly.",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 def _resolve_path(p: Path) -> Path:
@@ -105,6 +121,7 @@ def _generate_legacy(
 
     schedule_map = schedules_for_matter(mapping, matter_type)
     wb = load_workbook(template_path)
+    _warn_if_placeholder_master_workbook(wb, template_path)
 
     by_sched: dict[str, list[dict]] = {k: [] for k in schedule_map}
     for t in transactions:
@@ -339,6 +356,8 @@ def _generate_v12(
         raise FileNotFoundError(f"Template not found: {template_path}")
 
     wb = load_workbook(template_path)
+    _warn_if_placeholder_master_workbook(wb, template_path)
+
     sheets_cfg = mapping.sheets
 
     wb_meta = sheets_cfg.get("workingBalance") or {}
