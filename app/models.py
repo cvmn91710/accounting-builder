@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 from datetime import date
 from decimal import Decimal
 from enum import Enum
@@ -15,7 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class ExtractedTransaction(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    date: Optional[date] = None
+    # Use datetime.date (not `date`) so the field name `date` does not shadow the type.
+    date: Optional[datetime.date] = None
     description: Optional[str] = None
     amount: Optional[Decimal] = None
     txn_type: Optional[str] = Field(default=None, alias="type")
