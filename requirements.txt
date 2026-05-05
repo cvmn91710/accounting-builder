@@ -1,5 +1,5 @@
 # Golden Oaks Probate Accounting App — V1
-streamlit>=1.32.0
+streamlit[pdf]>=1.56.0
 pydantic>=2.6.0
 pydantic-settings>=2.2.0
 sqlalchemy>=2.0.0
