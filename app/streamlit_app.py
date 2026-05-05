@@ -235,6 +235,12 @@ def run_ai_pipeline(session_id: str) -> None:
                         cost_basis=ta.get("cost_basis"),
                     )
                     db.add(t)
+                if not result.transactions:
+                    st.warning(
+                        f"**{stt.original_filename}**: extraction returned **0 transactions**. "
+                        "The PDF may be image-only (try a clearer scan), or table detection failed. "
+                        "Re-run **Process** after redeploy; if it persists, open an issue with a sample page."
+                    )
             except Exception as e:
                 stt.extraction_status = f"error: {e}"
         sess.status = "pending_categorization"
