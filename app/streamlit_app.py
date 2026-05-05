@@ -795,23 +795,25 @@ def main() -> None:
         if not stmt_ids:
             st.info("Upload statements first.")
         else:
-            pick = st.selectbox(
-                "Statement",
-                stmt_ids,
-                format_func=lambda i: next(
-                    (f"{s.institution or '—'} — {s.original_filename}" for s in stmts if s.id == i),
-                    i,
-                ),
-            )
+            head_a, head_b = st.columns([3, 2])
+            with head_a:
+                pick = st.selectbox(
+                    "Statement",
+                    stmt_ids,
+                    format_func=lambda i: next(
+                        (f"{s.institution or '—'} — {s.original_filename}" for s in stmts if s.id == i),
+                        i,
+                    ),
+                )
+            with head_b:
+                filt = st.radio(
+                    "Filter",
+                    ["all", "high", "needs_review", "unverified"],
+                    horizontal=True,
+                )
             current = next(s for s in stmts if s.id == pick)
             pdf_path = Path(current.pdf_storage_path) if current.pdf_storage_path else None
-            page_hint = st.number_input("PDF page", min_value=1, value=1, step=1)
 
-            filt = st.radio(
-                "Filter",
-                ["all", "high", "needs_review", "unverified"],
-                horizontal=True,
-            )
             right_tx = [t for t in txns if t.statement_id == pick]
             if filt == "high":
                 right_tx = [t for t in right_tx if (t.confidence or "") == "high"]
@@ -825,61 +827,104 @@ def main() -> None:
             elif filt == "unverified":
                 right_tx = [t for t in right_tx if not t.verified]
 
-            c1, c2 = st.columns([1, 1])
-            with c1:
-                if pdf_path:
+            pdf_col, table_col = st.columns([0.36, 0.64])
+            with pdf_col:
+                st.markdown("**Source PDF**")
+                page_hint = st.number_input(
+                    "Page",
+                    min_value=1,
+                    value=1,
+                    step=1,
+                    key=f"review_pdf_page_{pick}",
+                )
+                if pdf_path and pdf_path.exists():
                     render_pdf_html(pdf_path, int(page_hint))
-            with c2:
-                st.markdown("**Transactions**")
-                for t in right_tx:
-                    keyp = f"{t.id}_row"
-                    col_a, col_b = st.columns([3, 1])
-                    with col_a:
-                        st.write(
-                            f"**{t.txn_date or '—'}** {t.description or ''} — **{t.amount}**"
-                        )
-                        conf = t.confidence or "—"
-                        st.caption(f"Schedule: {t.schedule} | Confidence: {conf}")
-                    with col_b:
-                        if st.button("Go to page", key=f"gp_{t.id}"):
-                            st.session_state["jump_page"] = t.source_page or 1
-                    if "jump_page" in st.session_state and st.session_state.get("last_jump") != t.id:
-                        pass
-                st.divider()
-                for t in right_tx:
-                    sch = st.selectbox(
-                        "Schedule",
-                        list(SCHEDULE_UI_OPTIONS),
-                        index=_schedule_index(t.schedule),
-                        key=f"sch_{t.id}",
+                elif pdf_path:
+                    st.warning("PDF file missing on disk.")
+            with table_col:
+                st.caption(
+                    "Table: extracted **Date / Description / Amount** (read-only), AI **Category** + **AI conf**, "
+                    "then your **Subcategory**, **Normalized**, **Notes**, **Verified**, **Excluded**. "
+                    "Edit cells, then **Save changes**."
+                )
+                if not right_tx:
+                    st.caption("No rows match this filter.")
+                else:
+                    sch_opts = list(SCHEDULE_UI_OPTIONS)
+                    editor_height = min(520, 100 + 28 * max(len(right_tx), 1))
+                    edited = st.data_editor(
+                        _review_tx_table_rows(right_tx),
+                        key=f"review_editor_{pick}_{filt}",
+                        hide_index=True,
+                        num_rows="fixed",
+                        use_container_width=True,
+                        height=editor_height,
+                        column_config={
+                            "Date": st.column_config.TextColumn("Date", disabled=True, width="small"),
+                            "Description": st.column_config.TextColumn(
+                                "Description", disabled=True, width="large"
+                            ),
+                            "Amount": st.column_config.NumberColumn(
+                                "Amount", disabled=True, format="$%.2f", width="small"
+                            ),
+                            "Pg": st.column_config.NumberColumn("Pg", disabled=True, width="small"),
+                            "Category": st.column_config.SelectboxColumn(
+                                "Category",
+                                options=sch_opts,
+                                required=True,
+                                width="small",
+                            ),
+                            "AI conf": st.column_config.TextColumn(
+                                "AI conf", disabled=True, width="small"
+                            ),
+                            "Subcategory": st.column_config.TextColumn(
+                                "Subcategory", width="medium"
+                            ),
+                            "Normalized": st.column_config.TextColumn(
+                                "Normalized", width="medium"
+                            ),
+                            "Notes": st.column_config.TextColumn("Notes", width="medium"),
+                            "Verified": st.column_config.CheckboxColumn("Verified", width="small"),
+                            "Excluded": st.column_config.CheckboxColumn("Excluded", width="small"),
+                        },
                     )
-                    sub = st.text_input("Subcategory", value=t.subcategory or "", key=f"sub_{t.id}")
-                    norm = st.text_input(
-                        "Normalized description (optional)",
-                        value=t.normalized_description or "",
-                        key=f"nd_{t.id}",
-                    )
-                    notes = st.text_input("Notes", value=t.notes or "", key=f"n_{t.id}")
-                    excl = st.checkbox("Excluded from schedules", value=t.excluded, key=f"e_{t.id}")
-                    ver = st.checkbox("Verified", value=t.verified, key=f"v_{t.id}")
-                    if st.button("Save row", key=f"save_{t.id}"):
-                        with session_scope() as db:
-                            row = db.get(TransactionORM, t.id)
-                            if row:
-                                row.schedule = sch
-                                row.subcategory = sub or None
-                                row.normalized_description = norm or None
-                                row.notes = notes or None
-                                row.excluded = excl
-                                row.verified = ver
-                                if ver:
-                                    row.verified_by = user
-                                    row.verified_at = _utcnow()
-                                row.edited_by_staff = True
-                        st.success("Saved")
+                    edited_rows = _data_editor_output_as_rows(edited)
+                    if st.button("Save changes", type="primary", key=f"save_review_tbl_{pick}"):
+                        if len(edited_rows) != len(right_tx):
+                            st.error("Row count mismatch — refresh and try again.")
+                        else:
+                            with session_scope() as db:
+                                for orig, erow in zip(right_tx, edited_rows):
+                                    row = db.get(TransactionORM, orig.id)
+                                    if not row:
+                                        continue
+                                    cat = erow.get("Category")
+                                    if isinstance(cat, str) and cat in sch_opts:
+                                        row.schedule = cat
+                                    row.subcategory = (
+                                        str(erow.get("Subcategory") or "").strip() or None
+                                    )
+                                    row.normalized_description = (
+                                        str(erow.get("Normalized") or "").strip() or None
+                                    )
+                                    row.notes = (str(erow.get("Notes") or "").strip() or None)
+                                    row.excluded = bool(erow.get("Excluded"))
+                                    row.verified = bool(erow.get("Verified"))
+                                    if row.verified:
+                                        row.verified_by = user
+                                        row.verified_at = _utcnow()
+                                    else:
+                                        row.verified_by = None
+                                        row.verified_at = None
+                                    row.edited_by_staff = True
+                            st.success("Saved.")
+                            st.rerun()
 
                 stmt_tx_all = [t for t in txns if t.statement_id == pick]
-                if st.button("Approve all high-confidence on this statement"):
+                if stmt_tx_all and st.button(
+                    "Approve all high-confidence on this statement",
+                    key=f"appr_hi_{pick}",
+                ):
                     with session_scope() as db:
                         for t in stmt_tx_all:
                             if (t.confidence or "") == "high":
@@ -945,17 +990,49 @@ def main() -> None:
             st.json(load_admin_settings())
 
 
-def _schedule_index(current: Optional[str]) -> int:
+def _schedule_value_for_editor(current: Optional[str]) -> str:
+    """Map DB schedule to a value allowed in Review table SelectboxColumn."""
     opts = list(SCHEDULE_UI_OPTIONS)
-    # Legacy sessions may still have "H" from older builds — map to needs_review for editing
-    if current == "H":
-        return opts.index("needs_review")
-    if not current:
-        return opts.index("needs_review")
-    try:
-        return opts.index(current)
-    except ValueError:
-        return opts.index("needs_review")
+    if not current or current == "H":
+        return "needs_review"
+    if current in opts:
+        return current
+    return "needs_review"
+
+
+def _review_tx_table_rows(right_tx: list[TransactionORM]) -> list[dict[str, Any]]:
+    """Build rows for st.data_editor (insertion order = column order)."""
+    rows: list[dict[str, Any]] = []
+    for t in right_tx:
+        desc = (t.description or "").strip()
+        if len(desc) > 200:
+            desc = desc[:197] + "…"
+        rows.append(
+            {
+                "Date": t.txn_date.isoformat() if t.txn_date else "",
+                "Description": desc,
+                "Amount": float(t.amount) if t.amount is not None else None,
+                "Pg": int(t.source_page) if t.source_page is not None else None,
+                "Category": _schedule_value_for_editor(t.schedule),
+                "AI conf": (t.confidence or "—").strip() or "—",
+                "Subcategory": t.subcategory or "",
+                "Normalized": t.normalized_description or "",
+                "Notes": t.notes or "",
+                "Verified": bool(t.verified),
+                "Excluded": bool(t.excluded),
+            }
+        )
+    return rows
+
+
+def _data_editor_output_as_rows(edited: Any) -> list[dict[str, Any]]:
+    """Normalize st.data_editor return value (list of dicts or DataFrame)."""
+    if edited is None:
+        return []
+    if hasattr(edited, "to_dict"):
+        recs = edited.to_dict("records")
+        return [dict(r) for r in recs]
+    return [dict(r) for r in edited]
 
 
 if __name__ == "__main__":
