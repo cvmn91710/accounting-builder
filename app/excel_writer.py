@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
@@ -218,6 +218,94 @@ def _append_audit_legacy(
     audit_sheet.sheet_state = "hidden"
 
 
+def _mmddyy(d: date) -> str:
+    return f"{d.month}/{d.day}/{str(d.year)[-2:]}"
+
+
+def _txn_date_for_cell(d: Any) -> Any:
+    """Prefer native Excel dates over ISO strings."""
+    if d is None:
+        return None
+    if isinstance(d, datetime):
+        return d
+    if isinstance(d, date):
+        return d
+    if isinstance(d, str):
+        try:
+            return date.fromisoformat(d[:10])
+        except ValueError:
+            return d
+    return d
+
+
+def _subcategory_data_start_row(meta: Any) -> Optional[int]:
+    if not isinstance(meta, dict):
+        return None
+    if meta.get("dataStartRow") is not None:
+        return int(meta["dataStartRow"])
+    if meta.get("startRow") is not None:
+        return int(meta["startRow"])
+    return None
+
+
+def _resolve_workbook_sheet(wb, name_from_config: Optional[str]) -> Optional[str]:
+    """Match sheet tab; prefer exact string (e.g. trailing space in 'Schedule A ')."""
+    if not name_from_config:
+        return None
+    if name_from_config in wb.sheetnames:
+        return name_from_config
+    n = name_from_config.strip().lower()
+    for sn in wb.sheetnames:
+        if sn.strip().lower() == n:
+            return sn
+    return None
+
+
+def _apply_working_balance_header(
+    ws,
+    wb_meta: dict[str, Any],
+    matter_name: str,
+    period_start: date,
+    period_end: date,
+    session_meta: dict[str, Any],
+) -> None:
+    """Supports enriched mapping `writeCells` + legacy flat cell keys."""
+    write_cells = wb_meta.get("writeCells")
+    if isinstance(write_cells, dict):
+        ctx = {
+            "matterName": matter_name or "",
+            "caseNumber": (session_meta.get("case_number") or ""),
+            "accountingType": (session_meta.get("accounting_type") or ""),
+            "fiduciaryName": (session_meta.get("fiduciary_name") or ""),
+            "fiduciaryRole": (session_meta.get("fiduciary_role") or "Conservator"),
+            "periodStart": _mmddyy(period_start),
+            "periodEnd": _mmddyy(period_end),
+        }
+        for key, spec in write_cells.items():
+            if str(key).startswith("_") or not isinstance(spec, dict):
+                continue
+            cell_ref = spec.get("cell")
+            fmt = spec.get("writeFormat")
+            if not cell_ref or fmt is None:
+                continue
+            try:
+                ws[cell_ref] = str(fmt).format(**ctx)
+            except (KeyError, ValueError):
+                ws[cell_ref] = fmt
+        return
+
+    if c := wb_meta.get("matterNameCell"):
+        ws[c] = matter_name
+    if c := wb_meta.get("caseNumberCell"):
+        ws[c] = session_meta.get("case_number") or ""
+    if c := wb_meta.get("accountingTypeCell"):
+        ws[c] = session_meta.get("accounting_type") or ""
+    if c := wb_meta.get("fiduciaryNameCell"):
+        ws[c] = session_meta.get("fiduciary_name") or ""
+    if c := wb_meta.get("periodCell"):
+        ws[c] = f"{_mmddyy(period_start)} - {_mmddyy(period_end)}"
+
+
 def _match_subcategory_key(
     label: Optional[str], keys: list[str]
 ) -> Optional[str]:
@@ -254,22 +342,18 @@ def _generate_v12(
     sheets_cfg = mapping.sheets
 
     wb_meta = sheets_cfg.get("workingBalance") or {}
-    wb_sheet_n = (wb_meta.get("sheet") or "Working Balance").strip()
-    if wb_sheet_n in wb.sheetnames:
-        ws_wb = wb[wb_sheet_n]
-        if c := wb_meta.get("matterNameCell"):
-            ws_wb[c] = matter_name
-        if c := wb_meta.get("caseNumberCell"):
-            ws_wb[c] = session_meta.get("case_number") or ""
-        if c := wb_meta.get("accountingTypeCell"):
-            ws_wb[c] = session_meta.get("accounting_type") or ""
-        if c := wb_meta.get("fiduciaryNameCell"):
-            ws_wb[c] = session_meta.get("fiduciary_name") or ""
-        if c := wb_meta.get("periodCell"):
-            ws_wb[c] = f"{period_start} to {period_end}"
+    wb_sheet_n = _resolve_workbook_sheet(
+        wb, wb_meta.get("sheet") or "Working Balance"
+    )
+    if wb_sheet_n:
+        _apply_working_balance_header(
+            wb[wb_sheet_n], wb_meta, matter_name, period_start, period_end, session_meta
+        )
 
     bank_cfg = sheets_cfg.get("bankTransactions") or {}
-    bank_sheet_n = (bank_cfg.get("sheet") or "Bank Statement Transactions").strip()
+    bank_sheet_n = _resolve_workbook_sheet(
+        wb, bank_cfg.get("sheet") or "Bank Statement Transactions"
+    )
     bank_cols = bank_cfg.get("columns") or {
         "date": "A",
         "description": "B",
@@ -280,19 +364,25 @@ def _generate_v12(
         "credit": "G",
         "additional_info": "H",
     }
-    first_row = int(bank_cfg.get("firstBlockStartRow", 5))
-    gap = int(bank_cfg.get("blockGapRows", 2))
+    first_block_row = int(bank_cfg.get("firstBlockStartRow", 5))
+    block = bank_cfg.get("block") or {}
+    stride = int(
+        bank_cfg.get("blockStrideRows") or bank_cfg.get("blockGapRows") or 16
+    )
+    off_bank = int(block.get("bankNameRowOffset", 0))
+    off_data = int(block.get("dataStartRowOffset", 2))
 
     written_row: dict[str, tuple[str, int]] = {}  # txn_id -> (sheet name, row)
 
-    if bank_sheet_n in wb.sheetnames:
+    if bank_sheet_n:
         ws_bank = wb[bank_sheet_n]
-        row_ptr = first_row
-        for stmt_id in statements_order:
+        first_data_col = _col(bank_cols.get("date", "B"))
+        for block_idx, stmt_id in enumerate(statements_order):
             st = statement_by_id.get(stmt_id)
             if not st:
                 continue
             stmt_tx = [t for t in transactions if t.get("statement_id") == stmt_id]
+            base = first_block_row + block_idx * stride
             header = " ".join(
                 filter(
                     None,
@@ -303,8 +393,13 @@ def _generate_v12(
                     ],
                 )
             )
-            ws_bank.cell(row=row_ptr, column=1, value=header or "Account")
-            row_ptr += 1
+            name_row = base + off_bank
+            ws_bank.cell(
+                row=name_row,
+                column=first_data_col,
+                value=header or "Account",
+            )
+            row_ptr = base + off_data
             for t in stmt_tx:
                 amt = t.get("amount")
                 debit_val = None
@@ -319,11 +414,10 @@ def _generate_v12(
                     except (TypeError, ValueError):
                         pass
                 if "date" in bank_cols and t.get("txn_date") is not None:
-                    d = t["txn_date"]
                     ws_bank.cell(
                         row=row_ptr,
                         column=_col(bank_cols["date"]),
-                        value=d.isoformat() if hasattr(d, "isoformat") else d,
+                        value=_txn_date_for_cell(t["txn_date"]),
                     )
                 if "description" in bank_cols:
                     ws_bank.cell(
@@ -359,25 +453,19 @@ def _generate_v12(
                 if tid:
                     written_row[tid] = (bank_sheet_n, row_ptr)
                 row_ptr += 1
-            row_ptr += gap
 
     schedule_a = sheets_cfg.get("scheduleA") or {}
     if schedule_a:
-        sheet_a_name = (schedule_a.get("sheet") or "Schedule A").strip()
+        sheet_a_name = schedule_a.get("sheet") or "Schedule A"
         subs = schedule_a.get("subcategories") or {}
         sub_keys = list(subs.keys())
         cursors: dict[str, int] = {}
         for sk, meta in subs.items():
-            if isinstance(meta, dict) and "startRow" in meta:
-                cursors[sk] = int(meta["startRow"])
+            sr = _subcategory_data_start_row(meta)
+            if sr is not None:
+                cursors[sk] = sr
 
-        def _sheet_name_match(name: str) -> Optional[str]:
-            for sn in wb.sheetnames:
-                if sn.strip().lower() == name.strip().lower():
-                    return sn
-            return None
-
-        actual_a = _sheet_name_match(sheet_a_name)
+        actual_a = _resolve_workbook_sheet(wb, sheet_a_name)
         if actual_a:
             ws_a = wb[actual_a]
             for t in transactions:
@@ -395,11 +483,10 @@ def _generate_v12(
                     "amount": "C",
                 }
                 if "date" in cols and t.get("txn_date") is not None:
-                    d = t["txn_date"]
                     ws_a.cell(
                         row=r,
                         column=_col(cols["date"]),
-                        value=d.isoformat() if hasattr(d, "isoformat") else d,
+                        value=_txn_date_for_cell(t["txn_date"]),
                     )
                 if "description" in cols:
                     ws_a.cell(
@@ -418,21 +505,16 @@ def _generate_v12(
 
     schedule_c = sheets_cfg.get("scheduleC") or {}
     if schedule_c:
-        sheet_c_name = (schedule_c.get("sheet") or "Schedule C").strip()
+        sheet_c_name = schedule_c.get("sheet") or "Schedule C"
         subs_c = schedule_c.get("subcategories") or {}
         sub_keys_c = list(subs_c.keys())
         cursors_c: dict[str, int] = {}
         for sk, meta in subs_c.items():
-            if isinstance(meta, dict) and "startRow" in meta:
-                cursors_c[sk] = int(meta["startRow"])
+            sr = _subcategory_data_start_row(meta)
+            if sr is not None:
+                cursors_c[sk] = sr
 
-        def _find_c(name: str) -> Optional[str]:
-            for sn in wb.sheetnames:
-                if sn.strip().lower() == name.strip().lower():
-                    return sn
-            return None
-
-        actual_c = _find_c(sheet_c_name)
+        actual_c = _resolve_workbook_sheet(wb, sheet_c_name)
         if actual_c:
             ws_c = wb[actual_c]
             cols_c = schedule_c.get("columns") or {
@@ -453,11 +535,10 @@ def _generate_v12(
                 r = cursors_c[sk]
                 st = statement_by_id.get(t.get("statement_id") or "", {})
                 if "date" in cols_c and t.get("txn_date") is not None:
-                    d = t["txn_date"]
                     ws_c.cell(
                         row=r,
                         column=_col(cols_c["date"]),
-                        value=d.isoformat() if hasattr(d, "isoformat") else d,
+                        value=_txn_date_for_cell(t["txn_date"]),
                     )
                 if "account" in cols_c:
                     ws_c.cell(
@@ -484,7 +565,7 @@ def _generate_v12(
 
     schedule_f = sheets_cfg.get("scheduleF") or {}
     if schedule_f:
-        sheet_f_name = (schedule_f.get("sheet") or "Schedule F").strip()
+        sheet_f_name = schedule_f.get("sheet") or "Schedule F"
         data_start = int(schedule_f.get("dataStartRow", 7))
         cols_f = schedule_f.get("columns") or {
             "date": "A",
@@ -492,13 +573,7 @@ def _generate_v12(
             "carry_value": "C",
         }
 
-        def _find_f(name: str) -> Optional[str]:
-            for sn in wb.sheetnames:
-                if sn.strip().lower() == name.strip().lower():
-                    return sn
-            return None
-
-        actual_f = _find_f(sheet_f_name)
+        actual_f = _resolve_workbook_sheet(wb, sheet_f_name)
         if actual_f:
             ws_f = wb[actual_f]
             r = data_start
@@ -508,11 +583,10 @@ def _generate_v12(
                 if parse_schedule_letter(t.get("schedule")) != "F":
                     continue
                 if "date" in cols_f and t.get("txn_date") is not None:
-                    d = t["txn_date"]
                     ws_f.cell(
                         row=r,
                         column=_col(cols_f["date"]),
-                        value=d.isoformat() if hasattr(d, "isoformat") else d,
+                        value=_txn_date_for_cell(t["txn_date"]),
                     )
                 if "description" in cols_f:
                     ws_f.cell(
@@ -556,11 +630,10 @@ def _generate_v12(
         r = 3
         for t in ad_tx:
             if t.get("txn_date") is not None:
-                d = t["txn_date"]
                 ws_ad.cell(
                     row=r,
                     column=1,
-                    value=d.isoformat() if hasattr(d, "isoformat") else d,
+                    value=_txn_date_for_cell(t["txn_date"]),
                 )
             ws_ad.cell(row=r, column=2, value=t.get("description") or "")
             if t.get("amount") is not None:

@@ -605,6 +605,7 @@ def main() -> None:
                 "case_number": getattr(sess, "case_number", None),
                 "accounting_type": getattr(sess, "accounting_type", None),
                 "fiduciary_name": getattr(sess, "fiduciary_name", None),
+                "fiduciary_role": getattr(sess, "fiduciary_role", None),
             }
             out = generate_accounting_workbook(
                 matter_type=sess.matter_type,
