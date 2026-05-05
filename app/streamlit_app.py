@@ -526,6 +526,8 @@ def main() -> None:
                         ok = False
                 if ok:
                     st.success("Upload complete.")
+                    # Same script run: `stmts` was loaded before this commit; reload so Process/Review see PDFs.
+                    sess, stmts, txns = load_full_session(sid)
         if stmts:
             st.dataframe(
                 [
