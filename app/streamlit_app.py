@@ -11,6 +11,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import base64
+import hashlib
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -21,6 +22,7 @@ import streamlit.components.v1 as components
 
 from app import bootstrap_templates
 from app.admin_settings_store import is_admin_user, load_admin_settings
+from app.debug_agent_log import agent_debug_log
 from app.auth_entra import get_auth_url, handle_oauth_callback, require_user
 from app.config import get_settings
 from app.db import (
@@ -121,17 +123,62 @@ def ensure_session_in_state() -> None:
 
 def render_pdf_html(pdf_path: Path, page: int = 1) -> None:
     if not pdf_path.exists():
+        # #region agent log
+        agent_debug_log(
+            "streamlit_app.py:render_pdf_html",
+            "pdf_path_missing",
+            {"path": str(pdf_path)},
+            "H2",
+        )
+        # #endregion
         st.warning("PDF not found on disk.")
         return
-    b64 = base64.b64encode(pdf_path.read_bytes()).decode("utf-8")
+    sz = pdf_path.stat().st_size
+    est_b64 = (sz * 4 + 3) // 3
+    # #region agent log
+    agent_debug_log(
+        "streamlit_app.py:render_pdf_html",
+        "before_render",
+        {
+            "file_bytes": sz,
+            "est_data_url_chars": est_b64,
+            "page_hint": page,
+            "likely_data_url_too_large": est_b64 > 1_500_000,
+        },
+        "H1",
+    )
+    # #endregion
     h = 720
-    components.html(
-        f"""
+    key = "review_pdf_" + hashlib.sha256(
+        str(pdf_path.resolve()).encode("utf-8", errors="replace")
+    ).hexdigest()[:20]
+    try:
+        st.pdf(pdf_path, height=h, key=key)
+        # #region agent log
+        agent_debug_log(
+            "streamlit_app.py:render_pdf_html",
+            "render_used_st_pdf",
+            {"key": key},
+            "H1",
+        )
+        # #endregion
+    except Exception as e:
+        # #region agent log
+        agent_debug_log(
+            "streamlit_app.py:render_pdf_html",
+            "st_pdf_failed_using_data_url_fallback",
+            {"error_type": type(e).__name__, "error_message": str(e)[:500]},
+            "H3",
+        )
+        # #endregion
+        b64 = base64.b64encode(pdf_path.read_bytes()).decode("utf-8")
+        components.html(
+            f"""
         <iframe src="data:application/pdf;base64,{b64}#page={page}"
             width="100%" height="{h}" style="border:1px solid #ccc;"></iframe>
         """,
-        height=h + 12,
-    )
+            height=h + 12,
+        )
 
 
 def run_ai_pipeline(session_id: str) -> None:
