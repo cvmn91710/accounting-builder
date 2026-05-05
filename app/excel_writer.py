@@ -11,6 +11,7 @@ from typing import Any, Optional
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.utils import column_index_from_string
+from openpyxl.utils.cell import coordinate_from_string
 from app.config import get_settings, master_template_path
 from app.schedules import AD_HOC_SCHEDULE_LETTERS, ALL_SCHEDULE_LETTERS
 from app.template_config import (
@@ -44,6 +45,28 @@ def _resolve_path(p: Path) -> Path:
 
 def _col(letter: str) -> int:
     return column_index_from_string(letter.strip().upper())
+
+
+def _unmerge_covering_cell(ws, row: int, column: int) -> None:
+    """Remove a merged range that contains (row, column) so the cell can be written."""
+    for rng in list(ws.merged_cells.ranges):
+        if (
+            rng.min_row <= row <= rng.max_row
+            and rng.min_col <= column <= rng.max_col
+        ):
+            ws.unmerge_cells(str(rng))
+            return
+
+
+def _set_cell_value(ws, row: int, column: int, value: Any) -> None:
+    """Write a worksheet cell; unmerge first when the template uses merged placeholders."""
+    _unmerge_covering_cell(ws, row, column)
+    ws.cell(row=row, column=column, value=value)
+
+
+def _set_cell_by_a1(ws, cell_ref: str, value: Any) -> None:
+    col_letters, row = coordinate_from_string(cell_ref)
+    _set_cell_value(ws, row, column_index_from_string(col_letters), value)
 
 
 def _safe_filename(s: str) -> str:
@@ -306,21 +329,23 @@ def _apply_working_balance_header(
             if not cell_ref or fmt is None:
                 continue
             try:
-                ws[cell_ref] = str(fmt).format(**ctx)
+                _set_cell_by_a1(ws, cell_ref, str(fmt).format(**ctx))
             except (KeyError, ValueError):
-                ws[cell_ref] = fmt
+                _set_cell_by_a1(ws, cell_ref, fmt)
         return
 
     if c := wb_meta.get("matterNameCell"):
-        ws[c] = matter_name
+        _set_cell_by_a1(ws, c, matter_name)
     if c := wb_meta.get("caseNumberCell"):
-        ws[c] = session_meta.get("case_number") or ""
+        _set_cell_by_a1(ws, c, session_meta.get("case_number") or "")
     if c := wb_meta.get("accountingTypeCell"):
-        ws[c] = session_meta.get("accounting_type") or ""
+        _set_cell_by_a1(ws, c, session_meta.get("accounting_type") or "")
     if c := wb_meta.get("fiduciaryNameCell"):
-        ws[c] = session_meta.get("fiduciary_name") or ""
+        _set_cell_by_a1(ws, c, session_meta.get("fiduciary_name") or "")
     if c := wb_meta.get("periodCell"):
-        ws[c] = f"{_mmddyy(period_start)} - {_mmddyy(period_end)}"
+        _set_cell_by_a1(
+            ws, c, f"{_mmddyy(period_start)} - {_mmddyy(period_end)}"
+        )
 
 
 def _match_subcategory_key(
@@ -413,10 +438,11 @@ def _generate_v12(
                 )
             )
             name_row = base + off_bank
-            ws_bank.cell(
-                row=name_row,
-                column=first_data_col,
-                value=header or "Account",
+            _set_cell_value(
+                ws_bank,
+                name_row,
+                first_data_col,
+                header or "Account",
             )
             row_ptr = base + off_data
             for t in stmt_tx:
@@ -433,40 +459,54 @@ def _generate_v12(
                     except (TypeError, ValueError):
                         pass
                 if "date" in bank_cols and t.get("txn_date") is not None:
-                    ws_bank.cell(
-                        row=row_ptr,
-                        column=_col(bank_cols["date"]),
-                        value=_txn_date_for_cell(t["txn_date"]),
+                    _set_cell_value(
+                        ws_bank,
+                        row_ptr,
+                        _col(bank_cols["date"]),
+                        _txn_date_for_cell(t["txn_date"]),
                     )
                 if "description" in bank_cols:
-                    ws_bank.cell(
-                        row=row_ptr,
-                        column=_col(bank_cols["description"]),
-                        value=t.get("description") or "",
+                    _set_cell_value(
+                        ws_bank,
+                        row_ptr,
+                        _col(bank_cols["description"]),
+                        t.get("description") or "",
                     )
                 if "account" in bank_cols:
-                    ws_bank.cell(
-                        row=row_ptr,
-                        column=_col(bank_cols["account"]),
-                        value=st.get("account_last4") or "",
+                    _set_cell_value(
+                        ws_bank,
+                        row_ptr,
+                        _col(bank_cols["account"]),
+                        st.get("account_last4") or "",
                     )
                 if "check" in bank_cols:
-                    ws_bank.cell(row=row_ptr, column=_col(bank_cols["check"]), value="")
+                    _set_cell_value(
+                        ws_bank, row_ptr, _col(bank_cols["check"]), ""
+                    )
                 if "copy_chk" in bank_cols:
-                    ws_bank.cell(row=row_ptr, column=_col(bank_cols["copy_chk"]), value="")
+                    _set_cell_value(
+                        ws_bank, row_ptr, _col(bank_cols["copy_chk"]), ""
+                    )
                 if "debit" in bank_cols and debit_val is not None:
-                    ws_bank.cell(
-                        row=row_ptr, column=_col(bank_cols["debit"]), value=debit_val
+                    _set_cell_value(
+                        ws_bank,
+                        row_ptr,
+                        _col(bank_cols["debit"]),
+                        debit_val,
                     )
                 if "credit" in bank_cols and credit_val is not None:
-                    ws_bank.cell(
-                        row=row_ptr, column=_col(bank_cols["credit"]), value=credit_val
+                    _set_cell_value(
+                        ws_bank,
+                        row_ptr,
+                        _col(bank_cols["credit"]),
+                        credit_val,
                     )
                 if "additional_info" in bank_cols:
-                    ws_bank.cell(
-                        row=row_ptr,
-                        column=_col(bank_cols["additional_info"]),
-                        value=t.get("notes") or "",
+                    _set_cell_value(
+                        ws_bank,
+                        row_ptr,
+                        _col(bank_cols["additional_info"]),
+                        t.get("notes") or "",
                     )
                 tid = t.get("id")
                 if tid:
@@ -502,20 +542,22 @@ def _generate_v12(
                     "amount": "C",
                 }
                 if "date" in cols and t.get("txn_date") is not None:
-                    ws_a.cell(
-                        row=r,
-                        column=_col(cols["date"]),
-                        value=_txn_date_for_cell(t["txn_date"]),
+                    _set_cell_value(
+                        ws_a,
+                        r,
+                        _col(cols["date"]),
+                        _txn_date_for_cell(t["txn_date"]),
                     )
                 if "description" in cols:
-                    ws_a.cell(
-                        row=r,
-                        column=_col(cols["description"]),
-                        value=t.get("description") or "",
+                    _set_cell_value(
+                        ws_a,
+                        r,
+                        _col(cols["description"]),
+                        t.get("description") or "",
                     )
                 if "amount" in cols and t.get("amount") is not None:
-                    ws_a.cell(
-                        row=r, column=_col(cols["amount"]), value=float(t["amount"])
+                    _set_cell_value(
+                        ws_a, r, _col(cols["amount"]), float(t["amount"])
                     )
                 tid = t.get("id")
                 if tid:
@@ -554,28 +596,31 @@ def _generate_v12(
                 r = cursors_c[sk]
                 st = statement_by_id.get(t.get("statement_id") or "", {})
                 if "date" in cols_c and t.get("txn_date") is not None:
-                    ws_c.cell(
-                        row=r,
-                        column=_col(cols_c["date"]),
-                        value=_txn_date_for_cell(t["txn_date"]),
+                    _set_cell_value(
+                        ws_c,
+                        r,
+                        _col(cols_c["date"]),
+                        _txn_date_for_cell(t["txn_date"]),
                     )
                 if "account" in cols_c:
-                    ws_c.cell(
-                        row=r,
-                        column=_col(cols_c["account"]),
-                        value=st.get("account_last4") or "",
+                    _set_cell_value(
+                        ws_c,
+                        r,
+                        _col(cols_c["account"]),
+                        st.get("account_last4") or "",
                     )
                 if "description" in cols_c:
-                    ws_c.cell(
-                        row=r,
-                        column=_col(cols_c["description"]),
-                        value=t.get("description") or "",
+                    _set_cell_value(
+                        ws_c,
+                        r,
+                        _col(cols_c["description"]),
+                        t.get("description") or "",
                     )
                 if "check" in cols_c:
-                    ws_c.cell(row=r, column=_col(cols_c["check"]), value="")
+                    _set_cell_value(ws_c, r, _col(cols_c["check"]), "")
                 if "amount" in cols_c and t.get("amount") is not None:
-                    ws_c.cell(
-                        row=r, column=_col(cols_c["amount"]), value=float(t["amount"])
+                    _set_cell_value(
+                        ws_c, r, _col(cols_c["amount"]), float(t["amount"])
                     )
                 tid = t.get("id")
                 if tid:
@@ -602,23 +647,26 @@ def _generate_v12(
                 if parse_schedule_letter(t.get("schedule")) != "F":
                     continue
                 if "date" in cols_f and t.get("txn_date") is not None:
-                    ws_f.cell(
-                        row=r,
-                        column=_col(cols_f["date"]),
-                        value=_txn_date_for_cell(t["txn_date"]),
+                    _set_cell_value(
+                        ws_f,
+                        r,
+                        _col(cols_f["date"]),
+                        _txn_date_for_cell(t["txn_date"]),
                     )
                 if "description" in cols_f:
-                    ws_f.cell(
-                        row=r,
-                        column=_col(cols_f["description"]),
-                        value=t.get("description") or "",
+                    _set_cell_value(
+                        ws_f,
+                        r,
+                        _col(cols_f["description"]),
+                        t.get("description") or "",
                     )
                 key_cv = "carry_value" if "carry_value" in cols_f else "amount"
                 if key_cv in cols_f and t.get("amount") is not None:
-                    ws_f.cell(
-                        row=r,
-                        column=_col(cols_f[key_cv]),
-                        value=float(t["amount"]),
+                    _set_cell_value(
+                        ws_f,
+                        r,
+                        _col(cols_f[key_cv]),
+                        float(t["amount"]),
                     )
                 tid = t.get("id")
                 if tid:
@@ -649,15 +697,16 @@ def _generate_v12(
         r = 3
         for t in ad_tx:
             if t.get("txn_date") is not None:
-                ws_ad.cell(
-                    row=r,
-                    column=1,
-                    value=_txn_date_for_cell(t["txn_date"]),
+                _set_cell_value(
+                    ws_ad,
+                    r,
+                    1,
+                    _txn_date_for_cell(t["txn_date"]),
                 )
-            ws_ad.cell(row=r, column=2, value=t.get("description") or "")
+            _set_cell_value(ws_ad, r, 2, t.get("description") or "")
             if t.get("amount") is not None:
-                ws_ad.cell(row=r, column=3, value=float(t["amount"]))
-            ws_ad.cell(row=r, column=4, value=t.get("subcategory") or "")
+                _set_cell_value(ws_ad, r, 3, float(t["amount"]))
+            _set_cell_value(ws_ad, r, 4, t.get("subcategory") or "")
             tid = t.get("id")
             if tid:
                 written_row[tid] = (sheet_title, r)
