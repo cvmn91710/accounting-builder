@@ -1,10 +1,10 @@
-"""Load and validate JSON template mapping for Excel output."""
+"""Load and validate JSON template mapping for Excel output (legacy flat map + spec v1.2 master template)."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -16,18 +16,50 @@ class ScheduleRangeConfig(BaseModel):
 
 
 class TemplateMappingFile(BaseModel):
-    """Per spec: one mapping file can describe all matter types or nested keys."""
+    """Legacy: flat schedule letter → sheet/range (pre–v1.2 deployments)."""
 
     conservatorship: Optional[dict[str, ScheduleRangeConfig]] = None
     probate_estate: Optional[dict[str, ScheduleRangeConfig]] = None
     trust_administration: Optional[dict[str, ScheduleRangeConfig]] = None
-    # Flat fallback: schedule_letter -> config
     schedules: Optional[dict[str, ScheduleRangeConfig]] = None
     matter_metadata_cells: dict[str, str] = Field(default_factory=dict)
 
 
+class AdHocScheduleMeta(BaseModel):
+    """Spec v1.2 — metadata when adding D / G / I / K / L / P / X sheets."""
+
+    model_config = {"populate_by_name": True}
+
+    label: str
+    add_to_working_balance: Optional[str] = Field(default=None, alias="addToWorkingBalance")
+
+
+class MasterTemplateMappingV12(BaseModel):
+    """Spec v1.2 — single master workbook mapping (`sheets` block)."""
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    template_path: Optional[str] = Field(default=None, alias="templatePath")
+    sheets: dict[str, Any]
+    ad_hoc_schedules: dict[str, AdHocScheduleMeta] = Field(
+        default_factory=dict, alias="adHocSchedules"
+    )
+
+
+def is_v12_mapping_dict(data: dict[str, Any]) -> bool:
+    sheets = data.get("sheets")
+    return isinstance(sheets, dict) and "workingBalance" in sheets
+
+
 def load_template_mapping(path: Path) -> TemplateMappingFile:
     data = json.loads(path.read_text(encoding="utf-8"))
+    return TemplateMappingFile.model_validate(data)
+
+
+def load_mapping_any(path: Path) -> Union[TemplateMappingFile, MasterTemplateMappingV12]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if is_v12_mapping_dict(data):
+        return MasterTemplateMappingV12.model_validate(data)
     return TemplateMappingFile.model_validate(data)
 
 

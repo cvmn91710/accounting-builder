@@ -10,7 +10,13 @@ import google.generativeai as genai
 
 from app.config import get_settings
 from app.models import CategorizationResult, ConfidenceLevel
-from app.schedules import MatterType, matter_type_notes, schedules_prompt_block
+from app.schedules import (
+    AD_HOC_SCHEDULE_LETTERS,
+    MatterType,
+    STANDARD_SCHEDULE_LETTERS,
+    matter_type_notes,
+    schedules_prompt_block,
+)
 
 
 def _strip_json_fence(raw: str) -> str:
@@ -45,12 +51,14 @@ Schedule definitions:
 {schedules_prompt_block()}
 
 Tasks:
-- Assign each transaction to exactly one schedule letter A through I, OR use special values:
-  - "internal_transfer" for transfers between accounts owned by the same matter (exclude from ordinary schedules; still audit).
-  - "needs_review" when classification is ambiguous.
+- Assign each transaction to exactly one schedule letter from the firm's template scheme, OR use special values:
+  - Standard sheets (always in master workbook): {", ".join(sorted(STANDARD_SCHEDULE_LETTERS))}.
+  - Ad-hoc sheets (only when facts warrant — prefer standard schedules when they fit): {", ".join(sorted(AD_HOC_SCHEDULE_LETTERS))}.
+  - "internal_transfer" for transfers between accounts both held in the name of the estate/trust/conservatorship (exclude from schedule totals; still audit).
+  - "needs_review" when classification is ambiguous — do not guess.
 - Provide confidence: high, medium, or low for each.
 - Brief reasoning for medium/low.
-- subcategory: short label when helpful (e.g. Utilities, Interest Income, personal_needs).
+- subcategory: must match an existing subcategory header on the target sheet when possible (e.g. Schedule A: Interest; Schedule C: Living Expenses). Use a clear provisional label if unsure and rely on staff review.
 
 Return ONLY valid JSON:
 {{ "categorizations": [

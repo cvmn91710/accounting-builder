@@ -38,6 +38,7 @@ from app.gemini_extractor import extract_statement_with_gemini
 from app.models import ExtractionResult
 from app.pdf_ingest import PdfValidationError, save_uploaded_pdf, validate_pdf
 from app.reconciler import apply_internal_transfer_flags, issues_to_json, run_reconciliation
+from app.schedules import SCHEDULE_UI_OPTIONS
 from app.text_extract import extract_pdf
 
 
@@ -74,6 +75,7 @@ def _transaction_to_dict(t: TransactionORM) -> dict[str, Any]:
         "edited_by_staff": t.edited_by_staff,
         "verified_at": t.verified_at,
         "verified_by": t.verified_by,
+        "normalized_description": t.normalized_description,
     }
 
 
@@ -347,11 +349,17 @@ def main() -> None:
         st.subheader("New accounting session")
         with st.form("new_sess"):
             matter_name = st.text_input("Matter name / label")
-            matter_id = st.text_input("Matter ID (optional)")
+            matter_id = st.text_input("Matter ID / ActionStep (optional)")
             matter_type = st.selectbox(
                 "Matter type",
                 ["probate_estate", "conservatorship", "trust_administration"],
             )
+            accounting_type = st.selectbox(
+                "Accounting type",
+                ["First Account", "Subsequent Account"],
+            )
+            case_number = st.text_input("Court case number (optional)")
+            fiduciary_name = st.text_input("Fiduciary name (optional)")
             c1, c2 = st.columns(2)
             with c1:
                 p0 = st.date_input("Period start", value=date.today().replace(day=1))
@@ -367,6 +375,9 @@ def main() -> None:
                         matter_name=matter_name,
                         matter_id=matter_id or None,
                         matter_type=matter_type,
+                        accounting_type=accounting_type,
+                        case_number=case_number or None,
+                        fiduciary_name=fiduciary_name or None,
                         period_start=p0,
                         period_end=p1,
                         status="draft",
@@ -383,8 +394,10 @@ def main() -> None:
         st.error("Session not found.")
         return
 
+    acct = getattr(sess, "accounting_type", None) or "—"
     st.caption(
-        f"{sess.matter_name} | {sess.period_start} — {sess.period_end} | Type: {sess.matter_type}"
+        f"{sess.matter_name} | {sess.period_start} — {sess.period_end} | "
+        f"Matter: {sess.matter_type} | Accounting: {acct}"
     )
 
     tab_upload, tab_run, tab_review, tab_export = st.tabs(
@@ -527,24 +540,16 @@ def main() -> None:
                 for t in right_tx:
                     sch = st.selectbox(
                         "Schedule",
-                        [
-                            "A",
-                            "B",
-                            "C",
-                            "D",
-                            "E",
-                            "F",
-                            "G",
-                            "H",
-                            "I",
-                            "needs_review",
-                            "internal_transfer",
-                            "excluded",
-                        ],
+                        list(SCHEDULE_UI_OPTIONS),
                         index=_schedule_index(t.schedule),
                         key=f"sch_{t.id}",
                     )
                     sub = st.text_input("Subcategory", value=t.subcategory or "", key=f"sub_{t.id}")
+                    norm = st.text_input(
+                        "Normalized description (optional)",
+                        value=t.normalized_description or "",
+                        key=f"nd_{t.id}",
+                    )
                     notes = st.text_input("Notes", value=t.notes or "", key=f"n_{t.id}")
                     excl = st.checkbox("Excluded from schedules", value=t.excluded, key=f"e_{t.id}")
                     ver = st.checkbox("Verified", value=t.verified, key=f"v_{t.id}")
@@ -554,6 +559,7 @@ def main() -> None:
                             if row:
                                 row.schedule = sch
                                 row.subcategory = sub or None
+                                row.normalized_description = norm or None
                                 row.notes = notes or None
                                 row.excluded = excl
                                 row.verified = ver
@@ -594,6 +600,12 @@ def main() -> None:
                 full_st = db.query(StatementORM).filter_by(session_id=sid).all()
             tdicts = [_transaction_to_dict(t) for t in full_tx]
             sdict = {s.id: _statement_to_dict(s) for s in full_st}
+            stmt_order = [s.id for s in sorted(stmts, key=lambda x: (x.sort_order, x.id))]
+            session_meta = {
+                "case_number": getattr(sess, "case_number", None),
+                "accounting_type": getattr(sess, "accounting_type", None),
+                "fiduciary_name": getattr(sess, "fiduciary_name", None),
+            }
             out = generate_accounting_workbook(
                 matter_type=sess.matter_type,
                 matter_name=sess.matter_name,
@@ -603,6 +615,8 @@ def main() -> None:
                 statement_by_id=sdict,
                 mapping_path=settings.template_mapping_path,
                 verifier_email=user,
+                statement_order=stmt_order,
+                session_meta=session_meta,
             )
             xbytes = out.read_bytes()
             st.download_button(
@@ -622,26 +636,16 @@ def main() -> None:
 
 
 def _schedule_index(current: Optional[str]) -> int:
-    opts = [
-        "A",
-        "B",
-        "C",
-        "D",
-        "E",
-        "F",
-        "G",
-        "H",
-        "I",
-        "needs_review",
-        "internal_transfer",
-        "excluded",
-    ]
+    opts = list(SCHEDULE_UI_OPTIONS)
+    # Legacy sessions may still have "H" from older builds — map to needs_review for editing
+    if current == "H":
+        return opts.index("needs_review")
     if not current:
-        return 9
+        return opts.index("needs_review")
     try:
         return opts.index(current)
     except ValueError:
-        return 9
+        return opts.index("needs_review")
 
 
 if __name__ == "__main__":

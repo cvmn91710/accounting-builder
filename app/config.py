@@ -39,17 +39,10 @@ class Settings(BaseSettings):
         default="Accounting.Admin", validation_alias="ENTRA_ADMIN_ROLE"
     )
 
-    template_path_conservatorship: Path = Field(
-        default=Path("templates/conservatorship_template.xlsx"),
-        validation_alias="TEMPLATE_PATH_CONSERVATORSHIP",
-    )
-    template_path_probate: Path = Field(
-        default=Path("templates/probate_template.xlsx"),
-        validation_alias="TEMPLATE_PATH_PROBATE",
-    )
-    template_path_trust: Path = Field(
-        default=Path("templates/trust_template.xlsx"),
-        validation_alias="TEMPLATE_PATH_TRUST",
+    template_path: Path = Field(
+        default=Path("templates/2290_Accounting_Template.xlsx"),
+        validation_alias="TEMPLATE_PATH",
+        description="Single master Excel template (doc 2290) for all matter types — v1.2 spec.",
     )
     template_mapping_path: Path = Field(
         default=Path("templates/template_mapping.json"),
@@ -80,11 +73,6 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def matter_template_path(matter_type: str) -> Path:
-    s = get_settings()
-    key = (matter_type or "").lower().replace(" ", "_")
-    if "conservator" in key:
-        return s.template_path_conservatorship
-    if "trust" in key:
-        return s.template_path_trust
-    return s.template_path_probate
+def master_template_path() -> Path:
+    """Firm master workbook path (same file for Conservatorship / Probate / Trust per spec v1.2)."""
+    return get_settings().template_path

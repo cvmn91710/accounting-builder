@@ -1,4 +1,4 @@
-"""California probate schedule definitions and matter-type notes."""
+"""California fiduciary accounting schedule definitions — aligned with spec v1.2 (firm template)."""
 
 from __future__ import annotations
 
@@ -7,13 +7,41 @@ from typing import Literal
 
 MatterType = Literal["conservatorship", "probate_estate", "trust_administration"]
 
-SCHEDULE_LETTERS = ("A", "B", "C", "D", "E", "F", "G", "H", "I")
+# Standard template sheets (always present in master workbook)
+STANDARD_SCHEDULE_LETTERS = frozenset({"A", "B", "C", "E", "F"})
+
+# Added per case when transactions warrant (ad-hoc sheets)
+AD_HOC_SCHEDULE_LETTERS = frozenset({"D", "G", "I", "K", "L", "P", "X"})
+
+ALL_SCHEDULE_LETTERS = STANDARD_SCHEDULE_LETTERS | AD_HOC_SCHEDULE_LETTERS
+
+# Streamlit / verifier dropdown order (spec v1.2 letters; no Schedule H in firm template)
+SCHEDULE_UI_OPTIONS: tuple[str, ...] = (
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "I",
+    "K",
+    "L",
+    "P",
+    "X",
+    "needs_review",
+    "internal_transfer",
+    "excluded",
+)
+
+# Schedule B in the firm template = POH @ Beginning (not "Gains" — template wins per spec v1.2)
 
 
 @dataclass(frozen=True)
 class ScheduleDefinition:
     letter: str
     name: str
+    standard_in_template: bool
     includes: str
     excludes: str
 
@@ -21,57 +49,87 @@ class ScheduleDefinition:
 SCHEDULES: list[ScheduleDefinition] = [
     ScheduleDefinition(
         "A",
-        "Property on Hand at Beginning / Inventory",
-        "Opening account balances, securities held, real property",
-        "Income earned during period",
+        "Receipts (Schedule A)",
+        True,
+        "Interest; pensions/annuities/periodic payments; miscellaneous receipts",
+        "Internal transfers between matter-owned accounts",
     ),
     ScheduleDefinition(
         "B",
-        "Receipts",
-        "Interest, dividends, rental income, refunds, sale proceeds (principal portion)",
-        "Internal transfers, gains on sale",
+        "Property on Hand at Beginning (POH Beginning)",
+        True,
+        "Cash/cash equivalents and non-cash assets at period start (from I&A or prior Schedule E)",
+        "Income and expenses during the period",
     ),
     ScheduleDefinition(
         "C",
-        "Gains on Sales",
-        "Realized gains on sold securities or property",
-        "Unrealized gains, dividend reinvestments",
-    ),
-    ScheduleDefinition(
-        "D",
         "Disbursements",
-        "Bills paid, taxes, insurance, repairs, professional fees, bank fees",
-        "Distributions to beneficiaries, fiduciary compensation",
+        True,
+        "Living, medical, legal/professional, insurance, miscellaneous — incl. bank fees and professional fees unless broken out to ad-hoc P",
+        "Internal transfers between matter-owned accounts",
     ),
     ScheduleDefinition(
         "E",
-        "Losses on Sales",
-        "Realized losses on sold securities or property",
-        "Unrealized losses",
+        "Property on Hand at End (POH End)",
+        True,
+        "Ending cash/cash equivalents and non-cash assets",
+        "Income/expense items",
     ),
     ScheduleDefinition(
         "F",
-        "Distributions",
-        "Payments to beneficiaries, conservatee personal needs allowance",
-        "Fiduciary compensation, expenses",
+        "Additional Property Received During the Period",
+        True,
+        "Property received during the accounting period",
+        "Receipts already in Schedule A per firm convention",
+    ),
+    ScheduleDefinition(
+        "D",
+        "Losses on Sales During the Period",
+        False,
+        "Realized losses — ad-hoc sheet when required",
+        "Unrealized losses",
     ),
     ScheduleDefinition(
         "G",
-        "Property on Hand at End",
-        "Ending account balances, securities held, real property",
-        "Income/expenses",
-    ),
-    ScheduleDefinition(
-        "H",
-        "Liabilities",
-        "Mortgages, loans, unpaid bills as of period end",
-        "Paid disbursements",
+        "Distributions to Beneficiaries / Conservatee / Minor",
+        False,
+        "Distributions to non-matter accounts; personal needs allowance when broken out",
+        "Internal matter-to-matter transfers",
     ),
     ScheduleDefinition(
         "I",
-        "Fiduciary Compensation",
-        "Trustee fees, conservator fees, attorney fees",
-        "Other professional fees → D",
+        "Net Income from Trade or Business",
+        False,
+        "Business income — ad-hoc when matter operates a business",
+        "Wage income (typically Schedule A)",
+    ),
+    ScheduleDefinition(
+        "K",
+        "Change in Assets",
+        False,
+        "Non-trivial changes in character/holding of assets",
+        "Routine internal restructuring between matter accounts",
+    ),
+    ScheduleDefinition(
+        "L",
+        "Net Loss from Trade or Business",
+        False,
+        "Business losses — ad-hoc sheet",
+        "Non-business expenses (Schedule C)",
+    ),
+    ScheduleDefinition(
+        "P",
+        "Professional Fees",
+        False,
+        "Optional breakout from Schedule C when the firm uses a separate sheet",
+        "Fees left in Schedule C when not broken out",
+    ),
+    ScheduleDefinition(
+        "X",
+        "Cash Reconciliation",
+        False,
+        "Separate reconciliation schedule when required",
+        "Routine reconciliation on Bank Statement Transactions / Working Balance",
     ),
 ]
 
@@ -79,24 +137,37 @@ SCHEDULES: list[ScheduleDefinition] = [
 def schedules_prompt_block() -> str:
     lines = []
     for s in SCHEDULES:
+        kind = "standard template sheet" if s.standard_in_template else "ad-hoc sheet (create when needed)"
         lines.append(
-            f"- Schedule {s.letter} — {s.name}. Includes: {s.includes}. Excludes: {s.excludes}."
+            f"- Schedule {s.letter} — {s.name} ({kind}). "
+            f"Includes: {s.includes}. Excludes: {s.excludes}."
         )
+    lines.append(
+        "- Internal transfers between accounts both held in the name of the estate/trust/"
+        "conservatorship → use schedule value \"internal_transfer\" (excluded from schedule "
+        "totals; retained in audit trail)."
+    )
+    lines.append(
+        "- Transfers to a non-matter account are categorized (often ad-hoc Schedule G or "
+        "Schedule C / reimbursement depending on facts); use \"needs_review\" if ambiguous."
+    )
     return "\n".join(lines)
 
 
 def matter_type_notes(matter: MatterType) -> str:
     if matter == "conservatorship":
         return (
-            "Conservatorship: personal needs allowance may map to Schedule F; "
-            "bond and court order references may apply to Schedule D."
+            "Conservatorship (Probate Code § 2620): Schedule C subcategories often match "
+            "template defaults; personal needs allowance may appear under Schedule G when applicable; "
+            "bond/court orders may appear in Working Balance header."
         )
     if matter == "probate_estate":
         return (
-            "Probate estate: inventory & appraisal cross-refs; creditor claim "
-            "payments may be tracked within Schedule D per firm convention."
+            "Probate estate (Probate Code § 1061): Schedule C labels vary per case (funeral, "
+            "creditor claims, administration); I&A drives Schedule B; creditor payments often "
+            "tracked within Schedule C."
         )
     return (
-        "Trust administration: principal vs income distinction where required; "
-        "trustee compensation may split across principal/income per firm template."
+        "Trust administration (Probate Code § 16063, § 1064): principal vs income distinction "
+        "may split subcategories within Schedules A/C or parallel sheets when significant."
     )

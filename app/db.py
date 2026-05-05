@@ -18,6 +18,8 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -39,6 +41,11 @@ class AccountingSessionORM(Base):
     matter_name: Mapped[str] = mapped_column(String(512))
     matter_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     matter_type: Mapped[str] = mapped_column(String(64))
+    accounting_type: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )  # First Account / Subsequent Account
+    case_number: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    fiduciary_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     period_start: Mapped[date] = mapped_column(Date)
     period_end: Mapped[date] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(64), default="draft")
@@ -97,6 +104,7 @@ class TransactionORM(Base):
     confidence: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     ai_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    normalized_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     excluded: Mapped[bool] = mapped_column(Boolean, default=False)
     internal_transfer: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -121,7 +129,38 @@ def get_engine():
             connect_args={"check_same_thread": False},
         )
         Base.metadata.create_all(_engine)
+        _migrate_sqlite_schema(_engine)
     return _engine
+
+
+def _migrate_sqlite_schema(engine) -> None:
+    """Add columns introduced after first deploy (SQLite has no ALTER IF NOT EXISTS)."""
+    try:
+        insp = inspect(engine)
+    except Exception:
+        return
+    if insp.has_table("accounting_sessions"):
+        cols = {c["name"] for c in insp.get_columns("accounting_sessions")}
+        adds = []
+        if "accounting_type" not in cols:
+            adds.append("accounting_type VARCHAR(64)")
+        if "case_number" not in cols:
+            adds.append("case_number VARCHAR(256)")
+        if "fiduciary_name" not in cols:
+            adds.append("fiduciary_name VARCHAR(512)")
+        for ddl in adds:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE accounting_sessions ADD COLUMN {ddl}"))
+    insp = inspect(engine)
+    if insp.has_table("transactions"):
+        tcols = {c["name"] for c in insp.get_columns("transactions")}
+        if "normalized_description" not in tcols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE transactions ADD COLUMN normalized_description TEXT"
+                    )
+                )
 
 
 @contextmanager

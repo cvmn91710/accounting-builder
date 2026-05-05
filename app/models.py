@@ -92,5 +92,8 @@ class SessionMeta(BaseModel):
     matter_name: str
     matter_id: Optional[str] = None
     matter_type: str  # conservatorship | probate_estate | trust_administration
+    accounting_type: Optional[str] = None  # First Account | Subsequent Account
+    case_number: Optional[str] = None
+    fiduciary_name: Optional[str] = None
     period_start: date
     period_end: date

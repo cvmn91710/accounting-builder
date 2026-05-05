@@ -1,443 +1,486 @@
 {
-  "schedules": {
-    "A": {
-      "sheet": "Sch_A",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
+  "_version": "1.1",
+  "_lastVerifiedAgainst": "2290-Accounting_Template.xlsx",
+  "_lastVerifiedDate": "2026-05-04",
+  "_notes": [
+    "All row/column references verified against the live template using openpyxl.",
+    "Sheet name 'Schedule A ' has a trailing space — DO NOT trim it; openpyxl matches exactly.",
+    "Working Balance A1 and A2 contain BOTH the label and example text in a single cell — see writeFormat hints.",
+    "Existing SUM formulas in the template often reference truncated ranges (e.g., =SUM(F40) instead of =SUM(F29:F42)) because the template was filled in for one example case. The app MUST regenerate SUM ranges to match the actual rows it inserts; do not preserve the literal existing formulas.",
+    "Every data section is cramped — the template has 1-15 row capacity per section. The app will almost always need to insert rows. After insertion, update the section totals AND the grand-total SUM formulas downstream (e.g., Schedule C grand total at F98 references all sub-section totals).",
+    "Schedule C grand total formula at F98 currently omits Miscellaneous. When Miscellaneous data is populated, the app must add F<misc-total-row> to the F98 formula.",
+    "The 'Insert name of Vendor' placeholder rows above each subcategory's column headers are vendor-grouping markers that staff use to organize transactions by payee. The app may insert vendor-name rows between the column-header row and the data, or just leave the placeholder and start writing data in the row beneath the column-header row."
+  ],
+  "templatePath": "templates/2290_Accounting_Template.xlsx",
+  "sheets": {
+    "workingBalance": {
+      "sheet": "Working Balance",
+      "writeCells": {
+        "matterName": {
+          "cell": "A1",
+          "writeFormat": "Name of Case: {matterName}",
+          "_note": "Cell already contains 'Name of Case  EX. Conservatorship of...' — overwrite entire cell using this format"
+        },
+        "caseNumber": {
+          "cell": "A2",
+          "writeFormat": "Court and Case No.: {caseNumber}",
+          "_note": "Cell already contains 'Court and Case No. EX. San Bernardino...' — overwrite entire cell using this format"
+        },
+        "accountingType": {
+          "cell": "B4",
+          "writeFormat": "{accountingType}",
+          "_note": "e.g. 'First Account Current', 'Second Account Current', 'First and Final Account'"
+        },
+        "fiduciaryName": {
+          "cell": "B5",
+          "writeFormat": " of {fiduciaryRole}, {fiduciaryName}",
+          "_note": "Leading space is intentional and matches existing template formatting. Example: ' of Conservator, Wendy Smith, CLPF'"
+        },
+        "summaryHeader": {
+          "cell": "B6",
+          "writeFormat": "Summary of Account",
+          "_note": "Static label — only rewrite if the template gets cleared"
+        },
+        "period": {
+          "cell": "B7",
+          "writeFormat": " {periodStart} - {periodEnd}",
+          "_note": "Date format MM/DD/YY (e.g., ' 9/26/24 - 11/30/25'). Leading space matches existing template."
+        }
+      },
+      "preservedFormulas": [
+        "D11", "D12", "D13", "D15", "D16", "D18",
+        "D22", "D23", "D24", "D26", "D28"
+      ],
+      "_note": "Working Balance pulls all numeric values from the schedule sheets via cross-sheet formulas. Do NOT touch column D — it's all formulas."
+    },
+    "statements": {
+      "sheet": "Statements",
+      "blockStartColumns": ["B", "I", "P"],
+      "blockColumnWidth": 6,
+      "_note": "Three blocks side-by-side, each 6 columns wide (B-G, I-N, P-U). Column H and O are gap columns. Add a 4th block at column W if needed for a 4th account.",
+      "rows": {
+        "bankNameRow": 2,
+        "iaIndicatorRow": 3,
+        "subHeaderRow": 4,
+        "dataStartRow": 5
+      },
+      "blockColumns": {
+        "_layout": "Within each 6-column block (e.g., block 1 starts at column B), the columns map as below. Substitute the block's start letter for the relative offsets.",
+        "acctNumber": 0,
+        "date": 1,
+        "need": 2,
+        "haveStatement": 3,
+        "haveCopyOfChecks": 4,
+        "input": 5
+      },
+      "subHeaders": {
+        "acctNumber": "Acct. #",
+        "date": "Date",
+        "need": "Need?",
+        "haveStatement": "Have Stmt? (1 or 0)",
+        "haveCopyOfChecks": "Have Copy Chks? (1 or 0)",
+        "input": "Input ?"
       }
     },
-    "B": {
-      "sheet": "Sch_B",
-      "first_data_row": 4,
+    "bankTransactions": {
+      "sheet": "Bank Statement Transactions",
+      "_note": "One block per account. The template ships with 2 example blocks; the app inserts more blocks as needed. Each block is 16 rows tall.",
+      "block": {
+        "height": 16,
+        "bankNameRowOffset": 0,
+        "columnHeaderRowOffset": 1,
+        "dataStartRowOffset": 2,
+        "dataEndRowOffset": 8,
+        "totalsRowOffset": 10,
+        "balanceCheckRowOffset": 14,
+        "_note": "Add the block's startRow to each offset. Example: Block 1 startRow=2 → bank name at row 2, column headers at row 3, data rows 4-10, totals row 12, balance check row 16."
+      },
+      "firstBlockStartRow": 2,
+      "blockStrideRows": 16,
       "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
+        "date": "B",
+        "description": "C",
+        "account": "D",
+        "check": "E",
+        "copy_chk": "F",
+        "debit": "G",
+        "credit": "H",
+        "additional_info": "I"
+      },
+      "totalsFormulas": {
+        "_note": "When inserting rows, regenerate these formulas with updated ranges.",
+        "debitTotal": "=SUM(G{dataStartRow}:G{dataEndRow})",
+        "creditTotal": "=SUM(H{dataStartRow}:H{dataEndRow})",
+        "balanceCheck": "=(H{totalsRow}-G{totalsRow})",
+        "balanceLabelCell": "C{balanceRow}",
+        "balanceLabelText": " BALACE AT DOD",
+        "totalLabelCell": "C{totalsRow}",
+        "totalLabelText": "TOTALS",
+        "balancedIndicatorCell": "H{balanceRow}",
+        "balancedIndicatorText": "BALANCED= YES"
       }
     },
-    "C": {
-      "sheet": "Sch_C",
-      "first_data_row": 4,
+    "scheduleB": {
+      "sheet": "POH @ Beginning Schedule B",
+      "headerCells": {
+        "matterRef": "A2",
+        "valuedAsOfDate": "A5"
+      },
       "columns": {
-        "date": "A",
         "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
+        "marketValue": "D",
+        "carryValue": "E"
+      },
+      "sections": {
+        "cash": {
+          "subHeaderRow": 7,
+          "subHeaderText": "Cash and Cash Equivalents",
+          "columnHeaderRow": 8,
+          "dataStartRow": 9,
+          "dataEndRow": 10,
+          "totalsRow": 12,
+          "totalsLabelCell": "B12",
+          "totalsLabelText": "Total Cash and Cash Equivalents",
+          "totalsCells": {
+            "marketValue": "D12",
+            "carryValue": "E12"
+          },
+          "totalsFormulaPattern": {
+            "marketValue": "=SUM(D{dataStartRow}:D{dataEndRow})",
+            "carryValue": "=SUM(E{dataStartRow}:E{dataEndRow})"
+          }
+        },
+        "nonCash": {
+          "subHeaderRow": 14,
+          "subHeaderText": "Non-Cash Assets",
+          "columnHeaderRow": 15,
+          "dataStartRow": 16,
+          "dataEndRow": 16,
+          "totalsRow": 18,
+          "totalsLabelCell": "B18",
+          "totalsLabelText": "Total Non-Cash Assets",
+          "totalsCells": {
+            "marketValue": "D18",
+            "carryValue": "E18"
+          },
+          "totalsFormulaPattern": {
+            "marketValue": "=SUM(D{dataStartRow}:D{dataEndRow})",
+            "carryValue": "=SUM(E{dataStartRow}:E{dataEndRow})"
+          }
+        }
+      },
+      "grandTotal": {
+        "row": 23,
+        "labelCell": "B23",
+        "labelText": "Total Property on Hand at the Beginning of the Accounting Period",
+        "marketValueCell": "D23",
+        "carryValueCell": "E23",
+        "_note": "Row references are relative to the cash and non-cash totals rows; if those move (rows inserted), update D23/E23 formulas accordingly."
       }
     },
-    "D": {
-      "sheet": "Sch_D",
-      "first_data_row": 4,
+    "scheduleE": {
+      "sheet": "POH @ End Schedule E",
+      "headerCells": {
+        "matterRef": "A2",
+        "valuedAsOfDate": "A5"
+      },
       "columns": {
-        "date": "A",
         "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
+        "marketValue": "D",
+        "carryValue": "E"
+      },
+      "sections": {
+        "cash": {
+          "subHeaderRow": 7,
+          "subHeaderText": "Cash and Cash Equivalents",
+          "columnHeaderRow": 9,
+          "dataStartRow": 10,
+          "dataEndRow": 11,
+          "totalsRow": 12,
+          "totalsLabelCell": "B12",
+          "totalsLabelText": "Total Cash and Cash Equivalents",
+          "totalsCells": {
+            "marketValue": "D12",
+            "carryValue": "E12"
+          },
+          "totalsFormulaPattern": {
+            "marketValue": "=SUM(D{dataStartRow}:D{dataEndRow})",
+            "carryValue": "=SUM(E{dataStartRow}:E{dataEndRow})"
+          }
+        },
+        "nonCash": {
+          "subHeaderRow": 14,
+          "subHeaderText": "Non-Cash Assets",
+          "columnHeaderRow": 16,
+          "dataStartRow": 17,
+          "dataEndRow": 17,
+          "totalsRow": 19,
+          "totalsLabelCell": "B19",
+          "totalsLabelText": "Total Non-Cash Assets",
+          "totalsCells": {
+            "marketValue": "D19",
+            "carryValue": "E19"
+          },
+          "totalsFormulaPattern": {
+            "marketValue": "=SUM(D{dataStartRow}:D{dataEndRow})",
+            "carryValue": "=SUM(E{dataStartRow}:E{dataEndRow})"
+          }
+        }
+      },
+      "grandTotal": {
+        "row": 24,
+        "labelCell": "B24",
+        "labelText": "Total Property on Hand at the End of the Accounting Period",
+        "marketValueCell": "D24",
+        "carryValueCell": "E24"
+      },
+      "knownIssues": [
+        "Cell E21 in the live template currently has a malformed formula: '=SUM(,E12)' — the leading comma will produce #NAME? in some Excel versions. The app should rewrite E21 to '=SUM(E12)' or '=E12' on save."
+      ]
+    },
+    "scheduleA": {
+      "sheet": "Schedule A ",
+      "_sheetNameNote": "Trailing space is intentional and matches the live template — do not trim.",
+      "headerCells": {
+        "matterRef": "A1",
+        "fromDate": "A4"
+      },
+      "columns": {
+        "date": "B",
+        "description": "C",
+        "amount": "E"
+      },
+      "_columnNote": "Column D is intentionally blank/spacer — write nothing to D.",
+      "subcategories": {
+        "Interest": {
+          "subHeaderRow": 5,
+          "subHeaderText": "Interest:",
+          "vendorPlaceholderRow": 7,
+          "columnHeaderRow": 8,
+          "dataStartRow": 9,
+          "dataEndRow": 13,
+          "continuedMarkerRow": 14,
+          "totalsRow": 15,
+          "totalsLabelCell": "C15",
+          "totalsLabelText": "Total Interest ",
+          "totalsCell": "E15",
+          "totalsFormulaPattern": "=SUM(E{dataStartRow}:E{dataEndRow})",
+          "_note": "If Interest needs more than 5 data rows, insert rows before row 14 and update both the formula and downstream row references."
+        },
+        "Pensions, Annuities, and Other Regular Periodic Payments": {
+          "subHeaderRow": 17,
+          "subHeaderText": "Pensions, Annuities, and Other Regular Periodic Payments:",
+          "vendorPlaceholderRow": 19,
+          "columnHeaderRow": 20,
+          "dataStartRow": 21,
+          "dataEndRow": 31,
+          "totalsRow": 32,
+          "totalsLabelCell": "B32",
+          "totalsLabelText": "Total Pensions, Annuities, and Other Regular Periodic Payments:",
+          "totalsCell": "E32",
+          "totalsFormulaPattern": "=SUM(E{dataStartRow}:E{dataEndRow})"
+        },
+        "Miscellaneous Receipts": {
+          "subHeaderRow": 34,
+          "subHeaderText": "Miscellaneous Receipts:",
+          "vendorPlaceholderRow": 36,
+          "columnHeaderRow": 37,
+          "dataStartRow": 38,
+          "dataEndRow": 41,
+          "subTotalsRow": 42,
+          "subTotalsCell": "E42",
+          "totalsRow": 44,
+          "totalsLabelCell": "C44",
+          "totalsLabelText": "Total Miscellaneous Receipts",
+          "totalsCell": "E44",
+          "totalsFormulaPattern": "=SUM(E{dataStartRow}:E{dataEndRow})",
+          "_note": "Existing template has both a sub-totals cell (E42) and a final totals cell (E44 = SUM(E42)). Simplest: write totalsFormulaPattern directly to E44 and either zero out E42 or sum E42 from the data range too."
+        }
+      },
+      "grandTotal": {
+        "row": 46,
+        "labelCell": "C46",
+        "labelText": "Total Schedule A",
+        "totalsCell": "D46",
+        "_currentFormula": "=SUM(E44,E32,E15)",
+        "_note": "When recreating: =SUM({InterestTotalsCell},{PensionsTotalsCell},{MiscReceiptsTotalsCell}). Note the grand total currently lands in column D, not E."
       }
     },
-    "E": {
-      "sheet": "Sch_E",
-      "first_data_row": 4,
+    "scheduleC": {
+      "sheet": "Schedule C",
+      "headerCells": {
+        "matterRef": "B1",
+        "fromDate": "B4"
+      },
       "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
+        "date": "B",
+        "account": "C",
+        "description": "D",
+        "check": "E",
+        "amount": "F"
+      },
+      "subcategories": {
+        "Residential Facility/Caregiver": {
+          "subHeaderRow": 5,
+          "subHeaderText": "Residential Facility/Caregiver:",
+          "vendorPlaceholderRow": 8,
+          "columnHeaderRow": 9,
+          "dataStartRow": 10,
+          "dataEndRow": 19,
+          "subTotalsRow": 21,
+          "subTotalsCell": "F21",
+          "totalsRow": 23,
+          "totalsLabelCell": "C23",
+          "totalsLabelText": "Total Residential Facility/Caregiver:",
+          "totalsCell": "F23",
+          "totalsFormulaPattern": "=SUM(F{dataStartRow}:F{dataEndRow})"
+        },
+        "Living Expenses": {
+          "subHeaderRow": 25,
+          "subHeaderText": "Living Expenses:",
+          "vendorPlaceholderRow": 27,
+          "columnHeaderRow": 28,
+          "dataStartRow": 29,
+          "dataEndRow": 41,
+          "totalsRow": 43,
+          "totalsLabelCell": "D43",
+          "totalsLabelText": "Total Living Expenses ",
+          "totalsCell": "F43",
+          "totalsFormulaPattern": "=SUM(F{dataStartRow}:F{dataEndRow})",
+          "_note": "Existing F43 formula is just '=SUM(F40)' (single cell) because the template's example case had one row. App must rewrite to the full range."
+        },
+        "Medical Expenses": {
+          "subHeaderRow": 45,
+          "subHeaderText": "Medical Expenses ",
+          "vendorPlaceholderRow": 47,
+          "columnHeaderRow": 48,
+          "dataStartRow": 49,
+          "dataEndRow": 55,
+          "subTotalsRow": 56,
+          "subTotalsCell": "F56",
+          "totalsRow": 59,
+          "totalsLabelCell": "C59",
+          "totalsLabelText": "Total Medical Expenses ",
+          "totalsCell": "F59",
+          "totalsFormulaPattern": "=SUM(F{dataStartRow}:F{dataEndRow})"
+        },
+        "Legal & Related Professional Expenses": {
+          "subHeaderRow": 62,
+          "subHeaderText": "Legal & Related Professional Expenses:",
+          "vendorPlaceholderRow": 64,
+          "columnHeaderRow": 65,
+          "dataStartRow": 66,
+          "dataEndRow": 71,
+          "totalsRow": 72,
+          "totalsLabelCell": "C72",
+          "totalsLabelText": "Total Legal & Related Professional Expenses",
+          "totalsCell": "F72",
+          "totalsFormulaPattern": "=SUM(F{dataStartRow}:F{dataEndRow})"
+        },
+        "Insurance": {
+          "subHeaderRow": 75,
+          "subHeaderText": "Insurance",
+          "vendorPlaceholderRow": 77,
+          "columnHeaderRow": 78,
+          "dataStartRow": 79,
+          "dataEndRow": 83,
+          "vendorSubTotalRow": 84,
+          "vendorSubTotalLabelCell": "D84",
+          "vendorSubTotalCell": "F84",
+          "totalsRow": 86,
+          "totalsLabelCell": "D86",
+          "totalsLabelText": "Total Insurance Expenses",
+          "totalsCell": "F86",
+          "totalsFormulaPattern": "=SUM(F{dataStartRow}:F{dataEndRow})",
+          "_note": "Insurance has nested vendor groupings (existing template shows 'Total Transamerica Life Insurance' at D84). For multi-vendor cases, expect per-vendor sub-totals; the section's grand total at F86 should sum all vendor sub-totals."
+        },
+        "Miscellaneous": {
+          "subHeaderRow": 88,
+          "subHeaderText": "Miscellanous ",
+          "vendorPlaceholderRow": 90,
+          "columnHeaderRow": 91,
+          "dataStartRow": 92,
+          "dataEndRow": 96,
+          "totalsRow": null,
+          "totalsCell": null,
+          "totalsFormulaPattern": "=SUM(F{dataStartRow}:F{dataEndRow})",
+          "_note": "Template has no dedicated Miscellaneous totals row. The app must add a totals row above row 98 (the grand total) and update F98 to include the Misc total. The label text in the template is 'Miscellanous' (typo missing the second 'e') — preserve as-is or fix; flag with the firm."
+        }
+      },
+      "grandTotal": {
+        "row": 98,
+        "labelCell": "D98",
+        "labelText": "Total Schedule C",
+        "totalsCell": "F98",
+        "_currentFormula": "=SUM(F86,F72,F59,F43,F23)",
+        "_note": "Current formula OMITS Miscellaneous. When recreating: include the Misc subcategory totals cell. Pattern: =SUM({allSubcategoryTotalsCells})."
       }
     },
-    "F": {
-      "sheet": "Sch_F",
-      "first_data_row": 4,
+    "scheduleF": {
+      "sheet": "Schedule F",
+      "headerCells": {
+        "matterRef": "B2",
+        "fromDate": "B5"
+      },
       "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "G": {
-      "sheet": "Sch_G",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "H": {
-      "sheet": "Sch_H",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "I": {
-      "sheet": "Sch_I",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
+        "date": "B",
+        "description": "C",
+        "carryValue": "F"
+      },
+      "_columnNote": "Columns D and E are intentionally blank/spacer in the description area — only B, C, and F carry data. The Description header at C6 visually spans C through E.",
+      "columnHeaderRow": 6,
+      "dataStartRow": 7,
+      "dataEndRow": 9,
+      "subTotalsRow": 10,
+      "subTotalsLabelCell": "D10",
+      "subTotalsLabelText": "Total Additional Property Received",
+      "subTotalsCell": "F10",
+      "subTotalsFormulaPattern": "=SUM(F{dataStartRow}:F{dataEndRow})",
+      "grandTotal": {
+        "row": 12,
+        "labelCell": "D12",
+        "labelText": "Total Schedule F",
+        "totalsCell": "F12",
+        "_currentFormula": "=F10"
       }
     }
   },
-  "probate_estate": {
-    "A": {
-      "sheet": "Sch_A",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "B": {
-      "sheet": "Sch_B",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "C": {
-      "sheet": "Sch_C",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
+  "adHocSchedules": {
+    "_note": "Schedules added per case as new sheets. App injects skeleton on demand. Use the same column layout as Schedule C for D/G/P (transaction-style) and Schedule F for K (property-style). I/L (trade or business) typically need a custom skeleton — flag for staff. X (Cash Reconciliation) is reconciliation-only and gets no Working Balance line.",
     "D": {
-      "sheet": "Sch_D",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "E": {
-      "sheet": "Sch_E",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "F": {
-      "sheet": "Sch_F",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
+      "label": "Losses on Sales During the Period",
+      "addToWorkingBalance": "CREDITS",
+      "skeleton": "scheduleC"
     },
     "G": {
-      "sheet": "Sch_G",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "H": {
-      "sheet": "Sch_H",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
+      "label": "Distributions to Beneficiaries / Conservatee / Minor",
+      "addToWorkingBalance": "CREDITS",
+      "skeleton": "scheduleC"
     },
     "I": {
-      "sheet": "Sch_I",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
+      "label": "Net Income from Trade or Business",
+      "addToWorkingBalance": "CHARGES",
+      "skeleton": "custom"
+    },
+    "K": {
+      "label": "Change in Assets",
+      "addToWorkingBalance": "CREDITS",
+      "skeleton": "scheduleF"
+    },
+    "L": {
+      "label": "Net Loss from Trade or Business",
+      "addToWorkingBalance": "CREDITS",
+      "skeleton": "custom"
+    },
+    "P": {
+      "label": "Professional Fees",
+      "addToWorkingBalance": "CREDITS",
+      "skeleton": "scheduleC"
+    },
+    "X": {
+      "label": "Cash Reconciliation",
+      "addToWorkingBalance": null,
+      "skeleton": "custom"
     }
-  },
-  "conservatorship": {
-    "A": {
-      "sheet": "Sch_A",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "B": {
-      "sheet": "Sch_B",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "C": {
-      "sheet": "Sch_C",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "D": {
-      "sheet": "Sch_D",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "E": {
-      "sheet": "Sch_E",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "F": {
-      "sheet": "Sch_F",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "G": {
-      "sheet": "Sch_G",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "H": {
-      "sheet": "Sch_H",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "I": {
-      "sheet": "Sch_I",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    }
-  },
-  "trust_administration": {
-    "A": {
-      "sheet": "Sch_A",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "B": {
-      "sheet": "Sch_B",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "C": {
-      "sheet": "Sch_C",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "D": {
-      "sheet": "Sch_D",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "E": {
-      "sheet": "Sch_E",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "F": {
-      "sheet": "Sch_F",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "G": {
-      "sheet": "Sch_G",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "H": {
-      "sheet": "Sch_H",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    },
-    "I": {
-      "sheet": "Sch_I",
-      "first_data_row": 4,
-      "columns": {
-        "date": "A",
-        "description": "B",
-        "amount": "C",
-        "payee": "D",
-        "category": "E",
-        "notes": "F"
-      }
-    }
-  },
-  "matter_metadata_cells": {}
+  }
 }
