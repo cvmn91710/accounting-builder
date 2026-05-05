@@ -54,6 +54,171 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Session workflow (human review gates after extraction, categorization, reconciliation)
+ST_DRAFT = "draft"
+ST_EXTRACTION_COMPLETE = "extraction_complete"
+ST_EXTRACTION_APPROVED = "extraction_approved"
+ST_CATEGORIZATION_COMPLETE = "categorization_complete"
+ST_CATEGORIZATION_APPROVED = "categorization_approved"
+ST_RECONCILIATION_COMPLETE = "reconciliation_complete"
+ST_PENDING_REVIEW = "pending_review"
+ST_COMPLETED = "completed"
+
+
+def migrate_workflow_status(sid: str) -> None:
+    """Map legacy statuses to the gated workflow."""
+    with session_scope() as db:
+        row = db.get(AccountingSessionORM, sid)
+        if not row:
+            return
+        if row.status == "pending_categorization":
+            row.status = ST_EXTRACTION_COMPLETE
+
+
+def run_extraction_stage(session_id: str) -> None:
+    settings = get_settings()
+    if not settings.gemini_api_key:
+        st.error("Configure GEMINI_API_KEY to run extraction.")
+        return
+    with session_scope() as db:
+        sess = db.get(AccountingSessionORM, session_id)
+        if not sess:
+            return
+        sess.reconciliation_json = None
+        stmts = (
+            db.query(StatementORM)
+            .filter_by(session_id=session_id)
+            .order_by(StatementORM.sort_order)
+            .all()
+        )
+        for stt in stmts:
+            if not stt.pdf_storage_path or not Path(stt.pdf_storage_path).exists():
+                stt.extraction_status = "error"
+                continue
+            try:
+                doc = extract_pdf(Path(stt.pdf_storage_path))
+                result: ExtractionResult = extract_statement_with_gemini(
+                    doc.combined_text, doc.tables_summary
+                )
+                stt.institution = result.institution
+                stt.account_type = result.account_type
+                stt.account_last4 = result.account_number_last4
+                stt.statement_period_start = result.statement_period_start
+                stt.statement_period_end = result.statement_period_end
+                stt.beginning_balance = result.beginning_balance
+                stt.ending_balance = result.ending_balance
+                stt.extraction_status = "extracted"
+                if result.flags:
+                    stt.extraction_flags_json = json.dumps(result.flags)
+
+                db.query(TransactionORM).filter_by(statement_id=stt.id).delete()
+                for ex in result.transactions:
+                    ta = ex.model_dump()
+                    db.add(
+                        TransactionORM(
+                            id=new_id(),
+                            statement_id=stt.id,
+                            txn_date=ta.get("date"),
+                            description=ta.get("description"),
+                            amount=ta.get("amount"),
+                            txn_type=ta.get("txn_type"),
+                            balance_after=ta.get("balance"),
+                            source_page=ta.get("source_page"),
+                            security_symbol=ta.get("security_symbol"),
+                            quantity=ta.get("quantity"),
+                            price=ta.get("price"),
+                            cost_basis=ta.get("cost_basis"),
+                        )
+                    )
+                if not result.transactions:
+                    st.warning(
+                        f"**{stt.original_filename}**: extraction returned **0 transactions**. "
+                        "The PDF may be image-only (try a clearer scan), or table detection failed."
+                    )
+            except Exception as e:
+                stt.extraction_status = f"error: {e}"
+        sess.status = ST_EXTRACTION_COMPLETE
+
+
+def run_categorization_stage(session_id: str) -> None:
+    settings = get_settings()
+    if not settings.gemini_api_key:
+        st.error("Configure GEMINI_API_KEY to run categorization.")
+        return
+    with session_scope() as db:
+        sess = db.get(AccountingSessionORM, session_id)
+        if not sess:
+            return
+        stmts = db.query(StatementORM).filter_by(session_id=session_id).all()
+        txns = (
+            db.query(TransactionORM)
+            .join(StatementORM)
+            .filter(StatementORM.session_id == session_id)
+            .all()
+        )
+        payload = []
+        for t in txns:
+            payload.append(
+                {
+                    "transactionId": t.id,
+                    "date": t.txn_date.isoformat() if t.txn_date else None,
+                    "description": t.description,
+                    "amount": str(t.amount) if t.amount is not None else None,
+                    "type": t.txn_type,
+                    "institution": next(
+                        (s.institution for s in stmts if s.id == t.statement_id), None
+                    ),
+                    "accountLast4": next(
+                        (s.account_last4 for s in stmts if s.id == t.statement_id), None
+                    ),
+                }
+            )
+        if not payload:
+            sess.status = ST_CATEGORIZATION_COMPLETE
+            return
+        try:
+            cat = categorize_with_gemini(sess.matter_type, payload)
+        except Exception as e:
+            st.error(f"Categorization failed: {e}")
+            return
+        cmap = {c.transaction_id: c for c in cat.categorizations}
+        for t in txns:
+            c = cmap.get(t.id)
+            if not c:
+                continue
+            t.schedule = c.schedule if isinstance(c.schedule, str) else str(c.schedule)
+            t.subcategory = c.subcategory
+            t.confidence = c.confidence.value if c.confidence else "medium"
+            t.ai_reasoning = c.reasoning
+        sess.status = ST_CATEGORIZATION_COMPLETE
+
+
+def run_reconciliation_stage(session_id: str) -> None:
+    with session_scope() as db:
+        sess = db.get(AccountingSessionORM, session_id)
+        if not sess:
+            return
+        stmts = db.query(StatementORM).filter_by(session_id=session_id).all()
+        txns = (
+            db.query(TransactionORM)
+            .join(StatementORM)
+            .filter(StatementORM.session_id == session_id)
+            .all()
+        )
+        sdicts = [_statement_to_dict(s) for s in stmts]
+        tdicts = [_transaction_to_dict(t) for t in txns]
+        issues = run_reconciliation(sdicts, tdicts)
+        apply_internal_transfer_flags(tdicts, issues)
+        for t in txns:
+            d = next((x for x in tdicts if x["id"] == t.id), None)
+            if d:
+                t.internal_transfer = bool(d.get("internal_transfer"))
+                if d.get("internal_transfer"):
+                    t.schedule = "internal_transfer"
+        sess.reconciliation_json = issues_to_json(issues)
+        sess.status = ST_RECONCILIATION_COMPLETE
+
+
 def _transaction_to_dict(t: TransactionORM) -> dict[str, Any]:
     return {
         "id": t.id,
@@ -183,137 +348,6 @@ def render_pdf_html(pdf_path: Path, page: int = 1) -> None:
         )
 
 
-def run_ai_pipeline(session_id: str) -> None:
-    settings = get_settings()
-    if not settings.gemini_api_key:
-        st.error("Configure GEMINI_API_KEY to run extraction and categorization.")
-        return
-
-    with session_scope() as db:
-        sess = db.get(AccountingSessionORM, session_id)
-        stmts = (
-            db.query(StatementORM)
-            .filter_by(session_id=session_id)
-            .order_by(StatementORM.sort_order)
-            .all()
-        )
-        for stt in stmts:
-            if not stt.pdf_storage_path or not Path(stt.pdf_storage_path).exists():
-                stt.extraction_status = "error"
-                continue
-            try:
-                doc = extract_pdf(Path(stt.pdf_storage_path))
-                result: ExtractionResult = extract_statement_with_gemini(
-                    doc.combined_text, doc.tables_summary
-                )
-                stt.institution = result.institution
-                stt.account_type = result.account_type
-                stt.account_last4 = result.account_number_last4
-                stt.statement_period_start = result.statement_period_start
-                stt.statement_period_end = result.statement_period_end
-                stt.beginning_balance = result.beginning_balance
-                stt.ending_balance = result.ending_balance
-                stt.extraction_status = "extracted"
-                if result.flags:
-                    stt.extraction_flags_json = json.dumps(result.flags)
-
-                db.query(TransactionORM).filter_by(statement_id=stt.id).delete()
-                for ex in result.transactions:
-                    ta = ex.model_dump()
-                    t = TransactionORM(
-                        id=new_id(),
-                        statement_id=stt.id,
-                        txn_date=ta.get("date"),
-                        description=ta.get("description"),
-                        amount=ta.get("amount"),
-                        txn_type=ta.get("txn_type"),
-                        balance_after=ta.get("balance"),
-                        source_page=ta.get("source_page"),
-                        security_symbol=ta.get("security_symbol"),
-                        quantity=ta.get("quantity"),
-                        price=ta.get("price"),
-                        cost_basis=ta.get("cost_basis"),
-                    )
-                    db.add(t)
-                if not result.transactions:
-                    st.warning(
-                        f"**{stt.original_filename}**: extraction returned **0 transactions**. "
-                        "The PDF may be image-only (try a clearer scan), or table detection failed. "
-                        "Re-run **Process** after redeploy; if it persists, open an issue with a sample page."
-                    )
-            except Exception as e:
-                stt.extraction_status = f"error: {e}"
-        sess.status = "pending_categorization"
-
-    with session_scope() as db:
-        sess = db.get(AccountingSessionORM, session_id)
-        stmts = db.query(StatementORM).filter_by(session_id=session_id).all()
-        txns = (
-            db.query(TransactionORM)
-            .join(StatementORM)
-            .filter(StatementORM.session_id == session_id)
-            .all()
-        )
-        payload = []
-        for t in txns:
-            payload.append(
-                {
-                    "transactionId": t.id,
-                    "date": t.txn_date.isoformat() if t.txn_date else None,
-                    "description": t.description,
-                    "amount": str(t.amount) if t.amount is not None else None,
-                    "type": t.txn_type,
-                    "institution": next(
-                        (s.institution for s in stmts if s.id == t.statement_id), None
-                    ),
-                    "accountLast4": next(
-                        (s.account_last4 for s in stmts if s.id == t.statement_id), None
-                    ),
-                }
-            )
-        if not payload:
-            sess.status = "pending_review"
-            return
-        try:
-            cat = categorize_with_gemini(sess.matter_type, payload)
-        except Exception as e:
-            st.error(f"Categorization failed: {e}")
-            return
-        cmap = {c.transaction_id: c for c in cat.categorizations}
-        for t in txns:
-            c = cmap.get(t.id)
-            if not c:
-                continue
-            t.schedule = c.schedule if isinstance(c.schedule, str) else str(c.schedule)
-            t.subcategory = c.subcategory
-            t.confidence = c.confidence.value if c.confidence else "medium"
-            t.ai_reasoning = c.reasoning
-        sess.status = "pending_review"
-
-    # Reconciliation
-    with session_scope() as db:
-        sess = db.get(AccountingSessionORM, session_id)
-        stmts = db.query(StatementORM).filter_by(session_id=session_id).all()
-        txns = (
-            db.query(TransactionORM)
-            .join(StatementORM)
-            .filter(StatementORM.session_id == session_id)
-            .all()
-        )
-        sdicts = [_statement_to_dict(s) for s in stmts]
-        tdicts = [_transaction_to_dict(t) for t in txns]
-        issues = run_reconciliation(sdicts, tdicts)
-        apply_internal_transfer_flags(tdicts, issues)
-        for t in txns:
-            d = next((x for x in tdicts if x["id"] == t.id), None)
-            if d:
-                t.internal_transfer = bool(d.get("internal_transfer"))
-                if d.get("internal_transfer"):
-                    t.schedule = "internal_transfer"
-        sess.reconciliation_json = issues_to_json(issues)
-        sess.status = "pending_review"
-
-
 def main() -> None:
     bootstrap_templates.ensure_placeholder_templates()
     ensure_session_in_state()
@@ -400,6 +434,9 @@ def main() -> None:
         st.error("Session not found.")
         return
 
+    migrate_workflow_status(sid)
+    sess, stmts, txns = load_full_session(sid)
+
     acct = getattr(sess, "accounting_type", None) or "—"
     st.caption(
         f"{sess.matter_name} | {sess.period_start} — {sess.period_end} | "
@@ -467,17 +504,181 @@ def main() -> None:
             )
 
     with tab_run:
-        st.subheader("AI extraction & categorization")
+        st.subheader("AI pipeline (human review gates)")
+        st.caption(
+            "Run **extraction**, then **categorization**, then **reconciliation** — each step requires an explicit "
+            "**approve** before the next. Use the **Review** tab to spot-check PDFs vs rows after extraction, "
+            "then again for schedule verification before export."
+        )
         if not settings.gemini_api_key:
-            st.warning("Set GEMINI_API_KEY in the environment to enable AI processing.")
-        if st.button("Run extraction + categorization + reconciliation", type="primary"):
-            with st.spinner("Processing…"):
-                run_ai_pipeline(sid)
-            st.success("Pipeline complete (or see errors above).")
+            st.warning("Set GEMINI_API_KEY in the environment to enable AI extraction and categorization.")
+        st.metric("Current stage", sess.status.replace("_", " ").title())
+
+        ready_pdfs = bool(stmts) and any(s.pdf_storage_path for s in stmts)
+
+        st.markdown("##### Step 1 — Extraction")
+        st.caption(
+            "Pulls transactions from each PDF via Gemini. Re-running replaces all transactions and clears later steps."
+        )
+        if st.button(
+            "Run AI extraction",
+            type="primary",
+            disabled=not ready_pdfs or not settings.gemini_api_key,
+        ):
+            with st.spinner("Extracting…"):
+                run_extraction_stage(sid)
+            st.success("Extraction finished. Review the summary below, then approve.")
             st.rerun()
+
+        if sess.status == ST_EXTRACTION_COMPLETE:
+            ext_rows = []
+            n_txn = 0
+            for s in stmts:
+                c = sum(1 for t in txns if t.statement_id == s.id)
+                n_txn += c
+                ext_rows.append(
+                    {
+                        "File": s.original_filename,
+                        "Extraction": s.extraction_status,
+                        "Transactions": c,
+                    }
+                )
+            st.dataframe(ext_rows, use_container_width=True, hide_index=True)
+            st.checkbox(
+                "I have reviewed the extraction summary (counts and statement errors).",
+                key=f"approve_extraction_{sid}",
+            )
+            if st.button(
+                "Approve extraction → unlock categorization",
+                disabled=not st.session_state.get(f"approve_extraction_{sid}", False),
+            ):
+                with session_scope() as db:
+                    row = db.get(AccountingSessionORM, sid)
+                    if row and row.status == ST_EXTRACTION_COMPLETE:
+                        row.status = ST_EXTRACTION_APPROVED
+                st.rerun()
+
+        elif sess.status in (
+            ST_EXTRACTION_APPROVED,
+            ST_CATEGORIZATION_COMPLETE,
+            ST_CATEGORIZATION_APPROVED,
+            ST_RECONCILIATION_COMPLETE,
+            ST_PENDING_REVIEW,
+            ST_COMPLETED,
+        ):
+            st.success("Extraction approved ✓")
+
+        st.markdown("##### Step 2 — Categorization")
+        st.caption("Assigns California schedule letters (Gemini). Requires approved extraction.")
+        if st.button(
+            "Run AI categorization",
+            type="primary",
+            disabled=sess.status != ST_EXTRACTION_APPROVED or not settings.gemini_api_key,
+        ):
+            with st.spinner("Categorizing…"):
+                run_categorization_stage(sid)
+            st.success("Categorization finished. Review suggested schedules, then approve.")
+            st.rerun()
+
+        if sess.status == ST_CATEGORIZATION_COMPLETE:
+            by_sched: dict[str, int] = {}
+            for t in txns:
+                k = (t.schedule or "—").strip()
+                by_sched[k] = by_sched.get(k, 0) + 1
+            st.dataframe(
+                [{"Schedule": k, "Count": v} for k, v in sorted(by_sched.items())],
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.checkbox(
+                "I have reviewed AI schedules and confidence (use Review tab to drill in).",
+                key=f"approve_cat_{sid}",
+            )
+            if st.button(
+                "Approve categorization → unlock reconciliation",
+                disabled=not st.session_state.get(f"approve_cat_{sid}", False),
+            ):
+                with session_scope() as db:
+                    row = db.get(AccountingSessionORM, sid)
+                    if row and row.status == ST_CATEGORIZATION_COMPLETE:
+                        row.status = ST_CATEGORIZATION_APPROVED
+                st.rerun()
+
+        elif sess.status in (
+            ST_CATEGORIZATION_APPROVED,
+            ST_RECONCILIATION_COMPLETE,
+            ST_PENDING_REVIEW,
+            ST_COMPLETED,
+        ):
+            st.success("Categorization approved ✓")
+
+        st.markdown("##### Step 3 — Reconciliation")
+        st.caption("Duplicates, internal transfers, balance hints. Requires approved categorization.")
+        if st.button(
+            "Run reconciliation",
+            type="primary",
+            disabled=sess.status != ST_CATEGORIZATION_APPROVED,
+        ):
+            with st.spinner("Reconciling…"):
+                run_reconciliation_stage(sid)
+            st.success("Reconciliation finished. Review issues, then approve.")
+            st.rerun()
+
+        if sess.status == ST_RECONCILIATION_COMPLETE:
+            rec_data = []
+            if sess.reconciliation_json:
+                try:
+                    rec_data = json.loads(sess.reconciliation_json)
+                except Exception:
+                    pass
+            if rec_data:
+                st.json(rec_data)
+            else:
+                st.info("No reconciliation issues recorded.")
+            st.checkbox(
+                "I have reviewed reconciliation results (and overrides in Review if needed).",
+                key=f"approve_rec_{sid}",
+            )
+            if st.button(
+                "Approve reconciliation → line-by-line verification",
+                disabled=not st.session_state.get(f"approve_rec_{sid}", False),
+            ):
+                with session_scope() as db:
+                    row = db.get(AccountingSessionORM, sid)
+                    if row and row.status == ST_RECONCILIATION_COMPLETE:
+                        row.status = ST_PENDING_REVIEW
+                st.rerun()
+
+        elif sess.status in (ST_PENDING_REVIEW, ST_COMPLETED):
+            st.success("Reconciliation approved ✓ — continue on the **Review** tab, then **Export**.")
+
+        if is_admin_user(user):
+            with st.expander("Admin: skip review gates (dev only)"):
+                st.caption("Sets status to **pending_review** without human checkboxes — use only for testing.")
+                if st.button("Force all gates approved"):
+                    with session_scope() as db:
+                        row = db.get(AccountingSessionORM, sid)
+                        if row and row.status not in (ST_DRAFT, ST_COMPLETED):
+                            row.status = ST_PENDING_REVIEW
+                    st.rerun()
 
     # Review tab
     with tab_review:
+        if sess.status in (
+            ST_EXTRACTION_COMPLETE,
+            ST_EXTRACTION_APPROVED,
+            ST_CATEGORIZATION_COMPLETE,
+            ST_CATEGORIZATION_APPROVED,
+            ST_RECONCILIATION_COMPLETE,
+        ):
+            st.info(
+                "You can compare PDFs to rows here at any time. "
+                "Complete the **Process** tab approvals through reconciliation before final verification for export."
+            )
+        elif sess.status == ST_PENDING_REVIEW:
+            st.success(
+                "Reconciliation is approved — verify each transaction (or mark excluded), then use **Export**."
+            )
         rec_data = []
         if sess.reconciliation_json:
             try:
