@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ScheduleRangeConfig(BaseModel):
@@ -28,7 +28,7 @@ class TemplateMappingFile(BaseModel):
 class AdHocScheduleMeta(BaseModel):
     """Spec v1.2 — metadata when adding D / G / I / K / L / P / X sheets."""
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "allow"}
 
     label: str
     add_to_working_balance: Optional[str] = Field(default=None, alias="addToWorkingBalance")
@@ -44,6 +44,22 @@ class MasterTemplateMappingV12(BaseModel):
     ad_hoc_schedules: dict[str, AdHocScheduleMeta] = Field(
         default_factory=dict, alias="adHocSchedules"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_adhoc_doc_keys(cls, data: Any) -> Any:
+        """JSON may include adHocSchedules._note (string); only letter → object entries are real."""
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("adHocSchedules")
+        if not isinstance(raw, dict):
+            return data
+        cleaned = {
+            k: v
+            for k, v in raw.items()
+            if not str(k).startswith("_") and isinstance(v, dict)
+        }
+        return {**data, "adHocSchedules": cleaned}
 
 
 def is_v12_mapping_dict(data: dict[str, Any]) -> bool:
