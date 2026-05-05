@@ -76,6 +76,9 @@ class StatementORM(Base):
     pdf_storage_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     extraction_flags_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    extraction_human_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    categorization_ai_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    categorization_human_approved: Mapped[bool] = mapped_column(Boolean, default=False)
 
     session: Mapped["AccountingSessionORM"] = relationship(back_populates="statements")
     transactions: Mapped[list["TransactionORM"]] = relationship(
@@ -161,6 +164,19 @@ def _migrate_sqlite_schema(engine) -> None:
                         "ALTER TABLE transactions ADD COLUMN normalized_description TEXT"
                     )
                 )
+    insp = inspect(engine)
+    if insp.has_table("statements"):
+        scols = {c["name"] for c in insp.get_columns("statements")}
+        sadds = []
+        if "extraction_human_approved" not in scols:
+            sadds.append("extraction_human_approved BOOLEAN DEFAULT 0")
+        if "categorization_ai_done" not in scols:
+            sadds.append("categorization_ai_done BOOLEAN DEFAULT 0")
+        if "categorization_human_approved" not in scols:
+            sadds.append("categorization_human_approved BOOLEAN DEFAULT 0")
+        for ddl in sadds:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE statements ADD COLUMN {ddl}"))
 
 
 @contextmanager
