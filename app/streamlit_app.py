@@ -509,6 +509,64 @@ def _extraction_review_table_rows(stmt_tx: list[TransactionORM]) -> list[dict[st
     return rows
 
 
+def _extraction_review_column_config(*, date_editable: bool) -> dict[str, Any]:
+    return {
+        "Date": st.column_config.TextColumn(
+            "Date", disabled=not date_editable, width="small"
+        ),
+        "Extracted payee": st.column_config.TextColumn(
+            "Extracted payee", disabled=True, width="small"
+        ),
+        "Payee (review)": st.column_config.TextColumn("Payee ✎", width="medium"),
+        "Raw description": st.column_config.TextColumn(
+            "Raw", disabled=True, width="medium"
+        ),
+        "AI cleaned": st.column_config.TextColumn(
+            "AI clean", disabled=True, width="medium"
+        ),
+        "Cleanup conf": st.column_config.TextColumn(
+            "Conf", disabled=True, width="small"
+        ),
+        "Clean description": st.column_config.TextColumn("Clean desc", width="large"),
+        "Client clarification": st.column_config.CheckboxColumn(
+            "Client?", width="small"
+        ),
+    }
+
+
+def _persist_extraction_review_edits(
+    stmt_tx: list[TransactionORM],
+    ex_rows: list[dict[str, Any]],
+    *,
+    update_txn_date: bool = False,
+) -> Optional[str]:
+    if len(ex_rows) != len(stmt_tx):
+        return "Row count mismatch — refresh and try again."
+    with session_scope() as db:
+        for orig, erow in zip(stmt_tx, ex_rows):
+            row = db.get(TransactionORM, orig.id)
+            if not row:
+                continue
+            if update_txn_date:
+                ds = str(erow.get("Date") or "").strip()
+                if ds:
+                    try:
+                        row.txn_date = date.fromisoformat(ds[:10])
+                    except ValueError:
+                        return f"Invalid date (use YYYY-MM-DD): {ds!r}"
+                else:
+                    row.txn_date = None
+            clar = bool(erow.get("Client clarification"))
+            clean = str(erow.get("Clean description") or "").strip()
+            row.normalized_description = clean or None
+            row.client_clarification = clar
+            row.description_staff_accepted = not clar
+            payee_rev = str(erow.get("Payee (review)") or "").strip()
+            row.payee_normalized = payee_rev or None
+            row.payee_staff_accepted = not clar
+    return None
+
+
 def _client_clarification_export_rows(
     txns: list[TransactionORM], stmts: list[StatementORM]
 ) -> list[dict[str, Any]]:
@@ -879,32 +937,9 @@ def main() -> None:
                             num_rows="fixed",
                             use_container_width=True,
                             height=ed_h,
-                            column_config={
-                                "Date": st.column_config.TextColumn(
-                                    "Date", disabled=True, width="small"
-                                ),
-                                "Extracted payee": st.column_config.TextColumn(
-                                    "Extracted payee", disabled=True, width="small"
-                                ),
-                                "Payee (review)": st.column_config.TextColumn(
-                                    "Payee ✎", width="medium"
-                                ),
-                                "Raw description": st.column_config.TextColumn(
-                                    "Raw", disabled=True, width="medium"
-                                ),
-                                "AI cleaned": st.column_config.TextColumn(
-                                    "AI clean", disabled=True, width="medium"
-                                ),
-                                "Cleanup conf": st.column_config.TextColumn(
-                                    "Conf", disabled=True, width="small"
-                                ),
-                                "Clean description": st.column_config.TextColumn(
-                                    "Clean desc", width="large"
-                                ),
-                                "Client clarification": st.column_config.CheckboxColumn(
-                                    "Client?", width="small"
-                                ),
-                            },
+                            column_config=_extraction_review_column_config(
+                                date_editable=False
+                            ),
                         )
                         ex_rows = _data_editor_output_as_rows(edited_ex)
                         if st.button(
@@ -912,26 +947,12 @@ def main() -> None:
                             type="primary",
                             key=f"save_ext_desc_{pick}",
                         ):
-                            if len(ex_rows) != len(stmt_tx):
-                                st.error("Row count mismatch — refresh and try again.")
+                            err = _persist_extraction_review_edits(
+                                stmt_tx, ex_rows, update_txn_date=False
+                            )
+                            if err:
+                                st.error(err)
                             else:
-                                with session_scope() as db:
-                                    for orig, erow in zip(stmt_tx, ex_rows):
-                                        row = db.get(TransactionORM, orig.id)
-                                        if not row:
-                                            continue
-                                        clar = bool(erow.get("Client clarification"))
-                                        clean = str(
-                                            erow.get("Clean description") or ""
-                                        ).strip()
-                                        row.normalized_description = clean or None
-                                        row.client_clarification = clar
-                                        row.description_staff_accepted = not clar
-                                        payee_rev = str(
-                                            erow.get("Payee (review)") or ""
-                                        ).strip()
-                                        row.payee_normalized = payee_rev or None
-                                        row.payee_staff_accepted = not clar
                                 st.success("Saved.")
                                 st.rerun()
                         if st.button(
@@ -992,10 +1013,33 @@ def main() -> None:
                         st.rerun()
             elif cur.extraction_human_approved and cur.extraction_status == "extracted":
                 st.success("Extraction approved for this statement ✓")
-                st.caption(
-                    "Below is a **read-only** copy of the approved extraction (PDF + rows). "
-                    "For spreadsheet-style edits after reconciliation, use the **Review** tab."
-                )
+                _ext_unlock_key = f"extraction_edit_unlocked_{pick}"
+                _unlocked = bool(st.session_state.get(_ext_unlock_key, False))
+                _b_u, _b_l, _ = st.columns([1, 1, 4])
+                with _b_u:
+                    if not _unlocked and st.button(
+                        "Unlock to edit",
+                        type="primary",
+                        key=f"unlock_ext_{pick}",
+                    ):
+                        st.session_state[_ext_unlock_key] = True
+                        st.rerun()
+                with _b_l:
+                    if _unlocked and st.button(
+                        "Lock (read-only)",
+                        key=f"lock_ext_{pick}",
+                    ):
+                        st.session_state[_ext_unlock_key] = False
+                        st.rerun()
+                if _unlocked:
+                    st.caption(
+                        "**Unlocked** — edit cells, then **Save changes**. Dates must be **YYYY-MM-DD**."
+                    )
+                else:
+                    st.caption(
+                        "**Locked** — view only. Click **Unlock to edit** to change date, payee, "
+                        "clean description, or client clarification. Use **Review** after finalize for schedules and more columns."
+                    )
                 if stmt_tx:
                     page_ext_ro = st.number_input(
                         "PDF page",
@@ -1015,12 +1059,39 @@ def main() -> None:
                         else:
                             st.warning("PDF path missing.")
                     with c_rows_ro:
-                        st.dataframe(
-                            _extraction_review_table_rows(stmt_tx),
-                            use_container_width=True,
-                            hide_index=True,
-                            height=_pane_ro,
-                        )
+                        if _unlocked:
+                            edited_apr = st.data_editor(
+                                _extraction_review_table_rows(stmt_tx),
+                                key=f"extraction_editor_appr_{pick}",
+                                hide_index=True,
+                                num_rows="fixed",
+                                use_container_width=True,
+                                height=_pane_ro,
+                                column_config=_extraction_review_column_config(
+                                    date_editable=True
+                                ),
+                            )
+                            ex_apr = _data_editor_output_as_rows(edited_apr)
+                            if st.button(
+                                "Save changes",
+                                type="primary",
+                                key=f"save_ext_appr_{pick}",
+                            ):
+                                err = _persist_extraction_review_edits(
+                                    stmt_tx, ex_apr, update_txn_date=True
+                                )
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.success("Saved.")
+                                    st.rerun()
+                        else:
+                            st.dataframe(
+                                _extraction_review_table_rows(stmt_tx),
+                                use_container_width=True,
+                                hide_index=True,
+                                height=_pane_ro,
+                            )
                         st.caption(f"{len(stmt_tx)} transaction row(s).")
                 else:
                     st.caption("No transaction rows on file for this statement.")
