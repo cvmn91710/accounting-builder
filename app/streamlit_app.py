@@ -53,6 +53,36 @@ st.set_page_config(
 )
 
 
+def _inject_workbench_layout_css() -> None:
+    """Reclaim horizontal space for PDF + wide tables; slightly tighten main padding."""
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] {
+            width: 16rem !important;
+            min-width: 16rem !important;
+            max-width: 16rem !important;
+        }
+        [data-testid="stSidebar"] > div:first-child {
+            width: 16rem !important;
+        }
+        .main .block-container {
+            padding-top: 1.25rem;
+            padding-left: 2.25rem;
+            padding-right: 2.25rem;
+            padding-bottom: 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _split_pane_scroll_height(row_count: int, cap: int = 680) -> int:
+    """Match PDF viewer and data editor heights in two-column review layouts."""
+    return min(cap, 88 + 26 * max(row_count, 1))
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -505,7 +535,7 @@ def _client_clarification_export_rows(
     return out
 
 
-def render_pdf_html(pdf_path: Path, page: int = 1) -> None:
+def render_pdf_html(pdf_path: Path, page: int = 1, *, height: int = 720) -> None:
     if not pdf_path.exists():
         # #region agent log
         agent_debug_log(
@@ -532,7 +562,7 @@ def render_pdf_html(pdf_path: Path, page: int = 1) -> None:
         "H1",
     )
     # #endregion
-    h = 720
+    h = height
     key = "review_pdf_" + hashlib.sha256(
         str(pdf_path.resolve()).encode("utf-8", errors="replace")
     ).hexdigest()[:20]
@@ -571,6 +601,7 @@ def main() -> None:
     handle_oauth_callback()
 
     st.title("Golden Oaks | Probate Accounting")
+    _inject_workbench_layout_css()
     user = require_user()
     settings = get_settings()
 
@@ -733,7 +764,10 @@ def main() -> None:
             st.warning(
                 "Set GEMINI_API_KEY in the environment to enable AI extraction and description cleanup."
             )
-        st.metric("Session stage", sess.status.replace("_", " ").title())
+        st.caption(
+            f"**Session stage:** {sess.status.replace('_', ' ').title()} — "
+            "open **Statements overview** below if you need the full list."
+        )
 
         stmt_ids = [s.id for s in stmts if s.pdf_storage_path]
         if not stmt_ids:
@@ -752,7 +786,8 @@ def main() -> None:
                         "# Txns": n,
                     }
                 )
-            st.dataframe(overview, use_container_width=True, hide_index=True)
+            with st.expander("Statements overview (all PDFs in this session)", expanded=False):
+                st.dataframe(overview, use_container_width=True, hide_index=True)
 
             pick = st.selectbox(
                 "Statement",
@@ -822,10 +857,12 @@ def main() -> None:
                 page_ext = st.number_input(
                     "PDF page", min_value=1, value=1, step=1, key=f"page_ext_{pick}"
                 )
-                c_pdf, c_rows = st.columns(2)
+                _nrows = len(stmt_tx)
+                _pane_h = _split_pane_scroll_height(_nrows)
+                c_pdf, c_rows = st.columns([0.38, 0.62])
                 with c_pdf:
                     if pdf_path and pdf_path.exists():
-                        render_pdf_html(pdf_path, int(page_ext))
+                        render_pdf_html(pdf_path, int(page_ext), height=_pane_h)
                     else:
                         st.warning("PDF path missing.")
                 with c_rows:
@@ -834,7 +871,7 @@ def main() -> None:
                         "then **Save description review**."
                     )
                     if stmt_tx:
-                        ed_h = min(520, 100 + 28 * max(len(stmt_tx), 1))
+                        ed_h = _pane_h
                         edited_ex = st.data_editor(
                             _extraction_review_table_rows(stmt_tx),
                             key=f"extraction_editor_{pick}",
@@ -850,22 +887,22 @@ def main() -> None:
                                     "Extracted payee", disabled=True, width="small"
                                 ),
                                 "Payee (review)": st.column_config.TextColumn(
-                                    "Payee (review)", width="medium"
+                                    "Payee ✎", width="medium"
                                 ),
                                 "Raw description": st.column_config.TextColumn(
-                                    "Raw description", disabled=True, width="medium"
+                                    "Raw", disabled=True, width="medium"
                                 ),
                                 "AI cleaned": st.column_config.TextColumn(
-                                    "AI cleaned", disabled=True, width="medium"
+                                    "AI clean", disabled=True, width="medium"
                                 ),
                                 "Cleanup conf": st.column_config.TextColumn(
-                                    "Cleanup conf", disabled=True, width="small"
+                                    "Conf", disabled=True, width="small"
                                 ),
                                 "Clean description": st.column_config.TextColumn(
-                                    "Clean description", width="large"
+                                    "Clean desc", width="large"
                                 ),
                                 "Client clarification": st.column_config.CheckboxColumn(
-                                    "Client clarification", width="small"
+                                    "Client?", width="small"
                                 ),
                             },
                         )
@@ -955,6 +992,38 @@ def main() -> None:
                         st.rerun()
             elif cur.extraction_human_approved and cur.extraction_status == "extracted":
                 st.success("Extraction approved for this statement ✓")
+                st.caption(
+                    "Below is a **read-only** copy of the approved extraction (PDF + rows). "
+                    "For spreadsheet-style edits after reconciliation, use the **Review** tab."
+                )
+                if stmt_tx:
+                    page_ext_ro = st.number_input(
+                        "PDF page",
+                        min_value=1,
+                        value=1,
+                        step=1,
+                        key=f"page_ext_ro_{pick}",
+                    )
+                    _nrows_ro = len(stmt_tx)
+                    _pane_ro = _split_pane_scroll_height(_nrows_ro)
+                    c_pdf_ro, c_rows_ro = st.columns([0.38, 0.62])
+                    with c_pdf_ro:
+                        if pdf_path and pdf_path.exists():
+                            render_pdf_html(
+                                pdf_path, int(page_ext_ro), height=_pane_ro
+                            )
+                        else:
+                            st.warning("PDF path missing.")
+                    with c_rows_ro:
+                        st.dataframe(
+                            _extraction_review_table_rows(stmt_tx),
+                            use_container_width=True,
+                            hide_index=True,
+                            height=_pane_ro,
+                        )
+                        st.caption(f"{len(stmt_tx)} transaction row(s).")
+                else:
+                    st.caption("No transaction rows on file for this statement.")
             elif str(cur.extraction_status).startswith("error"):
                 st.error(f"Extraction error: {cur.extraction_status}")
 
@@ -1008,10 +1077,12 @@ def main() -> None:
                     step=1,
                     key=f"page_cat_{pick_c}",
                 )
-                c_pdf2, c_rows2 = st.columns(2)
+                _ncat = len(stmt_tx_c)
+                _cat_h = _split_pane_scroll_height(_ncat)
+                c_pdf2, c_rows2 = st.columns([0.38, 0.62])
                 with c_pdf2:
                     if pdf_path_c and pdf_path_c.exists():
-                        render_pdf_html(pdf_path_c, int(page_cat))
+                        render_pdf_html(pdf_path_c, int(page_cat), height=_cat_h)
                     else:
                         st.warning("PDF path missing.")
                 with c_rows2:
@@ -1031,7 +1102,7 @@ def main() -> None:
                         ],
                         use_container_width=True,
                         hide_index=True,
-                        height=min(400, 80 + 28 * max(len(stmt_tx_c), 1)),
+                        height=_cat_h,
                     )
                     st.checkbox(
                         "Schedules look reasonable for this statement (use Review tab to edit cells).",
@@ -1216,7 +1287,7 @@ def main() -> None:
             elif filt == "unverified":
                 right_tx = [t for t in right_tx if not t.verified]
 
-            pdf_col, table_col = st.columns([0.36, 0.64])
+            pdf_col, table_col = st.columns([0.38, 0.62])
             with pdf_col:
                 st.markdown("**Source PDF**")
                 page_hint = st.number_input(
@@ -1226,8 +1297,9 @@ def main() -> None:
                     step=1,
                     key=f"review_pdf_page_{pick}",
                 )
+                _rev_h = _split_pane_scroll_height(len(right_tx) if right_tx else 1)
                 if pdf_path and pdf_path.exists():
-                    render_pdf_html(pdf_path, int(page_hint))
+                    render_pdf_html(pdf_path, int(page_hint), height=_rev_h)
                 elif pdf_path:
                     st.warning("PDF file missing on disk.")
             with table_col:
@@ -1240,7 +1312,7 @@ def main() -> None:
                     st.caption("No rows match this filter.")
                 else:
                     sch_opts = list(SCHEDULE_UI_OPTIONS)
-                    editor_height = min(520, 100 + 28 * max(len(right_tx), 1))
+                    editor_height = _split_pane_scroll_height(len(right_tx))
                     edited = st.data_editor(
                         _review_tx_table_rows(right_tx),
                         key=f"review_editor_{pick}_{filt}",
