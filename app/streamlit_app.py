@@ -54,10 +54,53 @@ st.set_page_config(
 
 
 def _inject_workbench_layout_css() -> None:
-    """Reclaim horizontal space for PDF + wide tables; slightly tighten main padding."""
+    """Apply Golden Oaks brand tokens and reclaim horizontal workspace."""
     st.markdown(
         """
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600&family=Poppins:wght@600;700&display=swap');
+
+        :root {
+            --color-burgundy: #8C2A2A;
+            --color-burgundy-dark: #6E2020;
+            --color-gold: #C49B3B;
+            --color-gold-dark: #A8822D;
+            --color-gold-tint: #F0E2B8;
+            --color-ink: #141F2E;
+            --color-body: #3D3D3D;
+            --color-bg: #FFFFFF;
+            --color-bg-soft: #F5F5F3;
+            --color-border: #D8D8D5;
+            --radius-pill: 999px;
+            --radius-card: 8px;
+        }
+
+        html, body, [class*="css"] {
+            font-family: "Open Sans", system-ui, -apple-system, sans-serif;
+            color: var(--color-body);
+        }
+
+        .stApp {
+            background: var(--color-bg);
+        }
+
+        h1, h2, h3, h4, h5, h6,
+        [data-testid="stMarkdownContainer"] h1,
+        [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stMarkdownContainer"] h3 {
+            font-family: "Poppins", system-ui, -apple-system, sans-serif;
+            color: var(--color-ink);
+            font-weight: 700;
+            letter-spacing: 0.1px;
+        }
+
+        [data-testid="stSidebar"] {
+            width: 16rem !important;
+            min-width: 16rem !important;
+            max-width: 16rem !important;
+            background: var(--color-bg-soft);
+            border-right: 1px solid var(--color-border);
+        }
         [data-testid="stSidebar"] {
             width: 16rem !important;
             min-width: 16rem !important;
@@ -71,6 +114,65 @@ def _inject_workbench_layout_css() -> None:
             padding-left: 2.25rem;
             padding-right: 2.25rem;
             padding-bottom: 1rem;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+        [data-testid="stSidebar"] [data-testid="stText"] {
+            color: var(--color-ink);
+        }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.25rem;
+            border-bottom: 2px solid var(--color-border);
+        }
+        .stTabs [data-baseweb="tab"] {
+            font-family: "Poppins", system-ui, -apple-system, sans-serif;
+            color: var(--color-ink);
+            font-weight: 600;
+            border-bottom: 2px solid transparent;
+        }
+        .stTabs [aria-selected="true"] {
+            color: var(--color-burgundy);
+            border-bottom-color: var(--color-gold);
+        }
+
+        .stButton > button,
+        .stDownloadButton > button,
+        .stLinkButton > a {
+            background: var(--color-gold);
+            color: #FFFFFF;
+            border: 1px solid var(--color-gold);
+            border-radius: var(--radius-pill);
+            font-family: "Poppins", system-ui, -apple-system, sans-serif;
+            font-weight: 600;
+            padding: 0.4rem 1rem;
+            transition: background-color 0.15s ease, border-color 0.15s ease;
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover,
+        .stLinkButton > a:hover {
+            background: var(--color-gold-dark);
+            border-color: var(--color-gold-dark);
+            color: #FFFFFF;
+        }
+
+        .stTextInput input,
+        .stTextArea textarea,
+        .stDateInput input,
+        .stSelectbox [data-baseweb="select"] > div {
+            border-color: var(--color-border);
+        }
+        .stTextInput input:focus,
+        .stTextArea textarea:focus,
+        .stDateInput input:focus {
+            border-color: var(--color-burgundy) !important;
+            box-shadow: 0 0 0 1px var(--color-burgundy) !important;
+        }
+
+        [data-testid="stMetricValue"] {
+            color: var(--color-burgundy);
+            font-family: "Poppins", system-ui, -apple-system, sans-serif;
+            font-weight: 700;
         }
         </style>
         """,
