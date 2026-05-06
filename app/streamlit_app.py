@@ -18,7 +18,6 @@ import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
-from uuid import uuid4
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -82,32 +81,6 @@ def _inject_workbench_layout_css() -> None:
 def _split_pane_scroll_height(row_count: int, cap: int = 680) -> int:
     """Match PDF viewer and data editor heights in two-column review layouts."""
     return min(cap, 88 + 26 * max(row_count, 1))
-
-
-def _debug_runtime_log(
-    *,
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, Any],
-) -> None:
-    """Write NDJSON debug evidence for runtime bug analysis."""
-    payload = {
-        "sessionId": "4f46b7",
-        "id": f"log_{uuid4().hex}",
-        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-    }
-    try:
-        with (_ROOT / "debug-4f46b7.log").open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
 
 
 def _utcnow() -> datetime:
@@ -621,26 +594,7 @@ def _client_clarification_export_rows(
 
 
 def render_pdf_html(pdf_path: Path, page: int = 1, *, height: int = 720) -> None:
-    run_id = "pdf-render-pre-fix"
-    # #region agent log
-    _debug_runtime_log(
-        run_id=run_id,
-        hypothesis_id="H1",
-        location="streamlit_app.py:render_pdf_html:entry",
-        message="entered_pdf_render",
-        data={"page": page, "height": height, "path_suffix": str(pdf_path)[-120:]},
-    )
-    # #endregion
     if not pdf_path.exists():
-        # #region agent log
-        _debug_runtime_log(
-            run_id=run_id,
-            hypothesis_id="H4",
-            location="streamlit_app.py:render_pdf_html:path_check",
-            message="pdf_path_missing",
-            data={"exists": False, "path_suffix": str(pdf_path)[-120:]},
-        )
-        # #endregion
         # #region agent log
         agent_debug_log(
             "streamlit_app.py:render_pdf_html",
@@ -653,20 +607,6 @@ def render_pdf_html(pdf_path: Path, page: int = 1, *, height: int = 720) -> None
         return
     sz = pdf_path.stat().st_size
     est_b64 = (sz * 4 + 3) // 3
-    # #region agent log
-    _debug_runtime_log(
-        run_id=run_id,
-        hypothesis_id="H3",
-        location="streamlit_app.py:render_pdf_html:file_stats",
-        message="pdf_size_evaluated",
-        data={
-            "exists": True,
-            "file_bytes": sz,
-            "est_data_url_chars": est_b64,
-            "likely_data_url_too_large": est_b64 > 1_500_000,
-        },
-    )
-    # #endregion
     # #region agent log
     agent_debug_log(
         "streamlit_app.py:render_pdf_html",
@@ -685,25 +625,7 @@ def render_pdf_html(pdf_path: Path, page: int = 1, *, height: int = 720) -> None
         str(pdf_path.resolve()).encode("utf-8", errors="replace")
     ).hexdigest()[:20]
     try:
-        # #region agent log
-        _debug_runtime_log(
-            run_id=run_id,
-            hypothesis_id="H2",
-            location="streamlit_app.py:render_pdf_html:st_pdf_call",
-            message="calling_st_pdf",
-            data={"key_suffix": key[-8:], "height": h},
-        )
-        # #endregion
         st.pdf(pdf_path, height=h, key=key)
-        # #region agent log
-        _debug_runtime_log(
-            run_id=run_id,
-            hypothesis_id="H2",
-            location="streamlit_app.py:render_pdf_html:st_pdf_return",
-            message="st_pdf_returned_without_python_exception",
-            data={"key_suffix": key[-8:]},
-        )
-        # #endregion
         # #region agent log
         agent_debug_log(
             "streamlit_app.py:render_pdf_html",
@@ -719,15 +641,6 @@ def render_pdf_html(pdf_path: Path, page: int = 1, *, height: int = 720) -> None
             "st_pdf_failed_using_data_url_fallback",
             {"error_type": type(e).__name__, "error_message": str(e)[:500]},
             "H3",
-        )
-        # #endregion
-        # #region agent log
-        _debug_runtime_log(
-            run_id=run_id,
-            hypothesis_id="H5",
-            location="streamlit_app.py:render_pdf_html:st_pdf_exception",
-            message="st_pdf_threw_python_exception_using_iframe_fallback",
-            data={"error_type": type(e).__name__, "error_message": str(e)[:300]},
         )
         # #endregion
         b64 = base64.b64encode(pdf_path.read_bytes()).decode("utf-8")
