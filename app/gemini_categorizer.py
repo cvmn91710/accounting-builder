@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 import google.generativeai as genai
@@ -36,12 +37,50 @@ def _resolve_matter_key(matter_type: str) -> MatterType:
     return "probate_estate"
 
 
+def _schedule_c_taxonomy_prompt_block() -> str:
+    """Return condensed Schedule C taxonomy guidance for the model prompt."""
+    taxonomy_path = Path(__file__).resolve().parent.parent / "Schedule_C_Master_Taxonomy.md"
+    if not taxonomy_path.exists():
+        return ""
+
+    raw = taxonomy_path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines()
+
+    keep: list[str] = []
+    in_design_notes = False
+    for line in lines:
+        s = line.rstrip()
+        if not s:
+            continue
+        if s.startswith("## "):
+            keep.append(s)
+            in_design_notes = s.lower().startswith("## design notes")
+            continue
+        if in_design_notes:
+            if s.startswith(("1.", "2.", "3.", "4.", "5.", "6.")) or s.startswith("- "):
+                keep.append(s)
+            continue
+        if s.startswith(("- ", "**Convention:**", "**Matter-type applicability:**")):
+            keep.append(s)
+
+    condensed = "\n".join(keep).strip()
+    if not condensed:
+        return ""
+
+    return (
+        "Schedule C — Master Disbursement Taxonomy (authoritative guidance)\n"
+        + condensed[:30_000]
+        + "\n"
+    )
+
+
 def build_categorization_prompt(
     matter_type: str,
     transactions: list[dict[str, Any]],
 ) -> str:
     mt_key = _resolve_matter_key(matter_type)
     mt = matter_type.replace("_", " ")
+    schedule_c_taxonomy = _schedule_c_taxonomy_prompt_block()
     return f"""You are a California probate accounting specialist.
 
 Matter type: {mt}
@@ -49,6 +88,8 @@ Context: {matter_type_notes(mt_key)}
 
 Schedule definitions:
 {schedules_prompt_block()}
+
+{schedule_c_taxonomy}
 
 Tasks:
 - Each transaction may include **payee** (counterparty) when provided — use it with **description** for classification.
