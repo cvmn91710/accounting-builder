@@ -84,6 +84,10 @@ def _inject_workbench_layout_css() -> None:
             background: var(--color-bg);
         }
 
+        p, label, span, div {
+            color: var(--color-body);
+        }
+
         h1, h2, h3, h4, h5, h6,
         [data-testid="stMarkdownContainer"] h1,
         [data-testid="stMarkdownContainer"] h2,
@@ -158,15 +162,46 @@ def _inject_workbench_layout_css() -> None:
 
         .stTextInput input,
         .stTextArea textarea,
-        .stDateInput input,
-        .stSelectbox [data-baseweb="select"] > div {
-            border-color: var(--color-border);
+        .stDateInput input {
+            background: #FFFFFF !important;
+            color: var(--color-ink) !important;
+            border: 1px solid var(--color-border) !important;
         }
+
+        .stSelectbox [data-baseweb="select"] > div,
+        .stMultiSelect [data-baseweb="select"] > div {
+            background: #FFFFFF !important;
+            color: var(--color-ink) !important;
+            border: 1px solid var(--color-border) !important;
+        }
+        .stSelectbox [data-baseweb="select"] * ,
+        .stMultiSelect [data-baseweb="select"] * {
+            color: var(--color-ink) !important;
+        }
+
         .stTextInput input:focus,
         .stTextArea textarea:focus,
         .stDateInput input:focus {
             border-color: var(--color-burgundy) !important;
             box-shadow: 0 0 0 1px var(--color-burgundy) !important;
+        }
+
+        [data-baseweb="input"] input,
+        [data-baseweb="textarea"] textarea {
+            background: #FFFFFF !important;
+            color: var(--color-ink) !important;
+        }
+
+        .stFileUploader [data-testid="stFileUploaderDropzone"] {
+            background: var(--color-bg-soft);
+            border: 1px dashed var(--color-border);
+        }
+        .stFileUploader [data-testid="stFileUploaderDropzone"] * {
+            color: var(--color-ink) !important;
+        }
+
+        [data-testid="stMarkdownContainer"] a {
+            color: var(--color-burgundy);
         }
 
         [data-testid="stMetricValue"] {
