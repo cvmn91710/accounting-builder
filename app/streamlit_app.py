@@ -11,7 +11,9 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import base64
+import csv
 import hashlib
+import io
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -34,6 +36,7 @@ from app.db import (
 )
 from app.excel_writer import generate_accounting_workbook
 from app.gemini_categorizer import categorize_with_gemini
+from app.gemini_description_cleanup import cleanup_descriptions_with_gemini
 from app.gemini_extractor import extract_statement_with_gemini
 from app.models import ExtractionResult
 from app.pdf_ingest import PdfValidationError, save_uploaded_pdf, validate_pdf
@@ -87,6 +90,84 @@ def migrate_workflow_status(sid: str) -> None:
 
 def _statements_with_pdf(stmts: list[StatementORM]) -> list[StatementORM]:
     return [s for s in stmts if s.pdf_storage_path]
+
+
+def _effective_description_for_category(t: TransactionORM) -> Optional[str]:
+    if (t.normalized_description or "").strip():
+        return (t.normalized_description or "").strip()
+    if (t.description_ai_cleaned or "").strip():
+        return (t.description_ai_cleaned or "").strip()
+    return (t.description or "").strip() or None
+
+
+def _extraction_description_resolved(t: TransactionORM) -> bool:
+    conf = (t.description_cleanup_confidence or "").lower()
+    if conf == "high":
+        return True
+    if t.description_staff_accepted:
+        return True
+    if t.client_clarification:
+        return True
+    return False
+
+
+def _statement_descriptions_resolved(stmt_tx: list[TransactionORM]) -> bool:
+    if not stmt_tx:
+        return True
+    return all(_extraction_description_resolved(t) for t in stmt_tx)
+
+
+def _apply_description_cleanup_to_rows(
+    stt: StatementORM, rows: list[TransactionORM]
+) -> None:
+    if not rows:
+        return
+    payload = [
+        {
+            "transactionId": r.id,
+            "description": r.description,
+            "institution": stt.institution,
+            "accountLast4": stt.account_last4,
+        }
+        for r in rows
+    ]
+    cres = cleanup_descriptions_with_gemini(payload)
+    cmap = {c.transaction_id: c for c in cres.cleanups}
+    for r in rows:
+        c = cmap.get(r.id)
+        if not c:
+            continue
+        r.description_ai_cleaned = c.cleaned_description
+        r.description_cleanup_confidence = (
+            c.confidence.value if c.confidence else "medium"
+        )
+        r.description_cleanup_reasoning = c.reasoning
+
+
+def run_description_cleanup_for_statement(session_id: str, statement_id: str) -> None:
+    settings = get_settings()
+    if not settings.gemini_api_key:
+        st.error("Configure GEMINI_API_KEY to run description cleanup.")
+        return
+    with session_scope() as db:
+        stt = db.get(StatementORM, statement_id)
+        if not stt or stt.session_id != session_id:
+            return
+        if stt.extraction_status != "extracted":
+            st.error("Extract this statement before running description cleanup.")
+            return
+        rows = db.query(TransactionORM).filter_by(statement_id=statement_id).all()
+        if not rows:
+            st.info("No transactions to clean.")
+            return
+        try:
+            _apply_description_cleanup_to_rows(stt, rows)
+        except Exception as e:
+            st.error(f"Description cleanup failed: {e}")
+            return
+        sess = db.get(AccountingSessionORM, session_id)
+        if sess and sess.status in (ST_RECONCILIATION_COMPLETE, ST_PENDING_REVIEW):
+            sess.status = ST_PROCESSING
 
 
 def all_statements_ready_for_reconciliation(stmts: list[StatementORM]) -> bool:
@@ -144,24 +225,37 @@ def run_extraction_for_statement(session_id: str, statement_id: str) -> None:
                 stt.extraction_flags_json = json.dumps(result.flags)
 
             db.query(TransactionORM).filter_by(statement_id=stt.id).delete()
+            new_rows: list[TransactionORM] = []
             for ex in result.transactions:
                 ta = ex.model_dump()
-                db.add(
-                    TransactionORM(
-                        id=new_id(),
-                        statement_id=stt.id,
-                        txn_date=ta.get("date"),
-                        description=ta.get("description"),
-                        amount=ta.get("amount"),
-                        txn_type=ta.get("txn_type"),
-                        balance_after=ta.get("balance"),
-                        source_page=ta.get("source_page"),
-                        security_symbol=ta.get("security_symbol"),
-                        quantity=ta.get("quantity"),
-                        price=ta.get("price"),
-                        cost_basis=ta.get("cost_basis"),
-                    )
+                tid = new_id()
+                row = TransactionORM(
+                    id=tid,
+                    statement_id=stt.id,
+                    txn_date=ta.get("date"),
+                    description=ta.get("description"),
+                    amount=ta.get("amount"),
+                    txn_type=ta.get("txn_type"),
+                    balance_after=ta.get("balance"),
+                    source_page=ta.get("source_page"),
+                    security_symbol=ta.get("security_symbol"),
+                    quantity=ta.get("quantity"),
+                    price=ta.get("price"),
+                    cost_basis=ta.get("cost_basis"),
                 )
+                db.add(row)
+                new_rows.append(row)
+            if new_rows and settings.gemini_api_key:
+                try:
+                    _apply_description_cleanup_to_rows(stt, new_rows)
+                    for r in new_rows:
+                        r.description_staff_accepted = False
+                        r.client_clarification = False
+                except Exception as e:
+                    st.warning(
+                        f"**{stt.original_filename}**: description cleanup failed "
+                        f"(transactions still saved): {e}"
+                    )
             if not result.transactions:
                 st.warning(
                     f"**{stt.original_filename}**: extraction returned **0 transactions**. "
@@ -198,7 +292,7 @@ def run_categorization_for_statement(session_id: str, statement_id: str) -> None
                 {
                     "transactionId": t.id,
                     "date": t.txn_date.isoformat() if t.txn_date else None,
-                    "description": t.description,
+                    "description": _effective_description_for_category(t),
                     "amount": str(t.amount) if t.amount is not None else None,
                     "type": t.txn_type,
                     "institution": next(
@@ -277,6 +371,11 @@ def _transaction_to_dict(t: TransactionORM) -> dict[str, Any]:
         "verified_at": t.verified_at,
         "verified_by": t.verified_by,
         "normalized_description": t.normalized_description,
+        "description_ai_cleaned": t.description_ai_cleaned,
+        "description_cleanup_confidence": t.description_cleanup_confidence,
+        "description_cleanup_reasoning": t.description_cleanup_reasoning,
+        "description_staff_accepted": t.description_staff_accepted,
+        "client_clarification": t.client_clarification,
     }
 
 
@@ -322,6 +421,50 @@ def load_full_session(sid: str) -> tuple[AccountingSessionORM, list[StatementORM
 def ensure_session_in_state() -> None:
     if "current_session_id" not in st.session_state:
         st.session_state.current_session_id = None
+
+
+def _extraction_review_table_rows(stmt_tx: list[TransactionORM]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for t in stmt_tx:
+        raw = (t.description or "").strip()
+        ai = (t.description_ai_cleaned or "").strip()
+        conf = ((t.description_cleanup_confidence or "—").strip() or "—")
+        default_clean = (t.normalized_description or "").strip() or ai or raw
+        rows.append(
+            {
+                "Date": t.txn_date.isoformat() if t.txn_date else "",
+                "Raw description": raw if len(raw) <= 800 else raw[:797] + "…",
+                "AI cleaned": ai if len(ai) <= 800 else ai[:797] + "…",
+                "Cleanup conf": conf,
+                "Clean description": default_clean,
+                "Client clarification": bool(t.client_clarification),
+            }
+        )
+    return rows
+
+
+def _client_clarification_export_rows(
+    txns: list[TransactionORM], stmts: list[StatementORM]
+) -> list[dict[str, Any]]:
+    by_id = {s.id: s for s in stmts}
+    out: list[dict[str, Any]] = []
+    for t in txns:
+        if not t.client_clarification:
+            continue
+        stt = by_id.get(t.statement_id)
+        out.append(
+            {
+                "Date": t.txn_date.isoformat() if t.txn_date else "",
+                "Amount": float(t.amount) if t.amount is not None else None,
+                "Raw description": (t.description or "")[:2000],
+                "AI cleaned": (t.description_ai_cleaned or "")[:2000],
+                "Cleanup confidence": t.description_cleanup_confidence or "",
+                "Notes": (t.notes or "")[:2000],
+                "Statement file": stt.original_filename if stt else "",
+                "Account last4": stt.account_last4 if stt else "",
+            }
+        )
+    return out
 
 
 def render_pdf_html(pdf_path: Path, page: int = 1) -> None:
@@ -479,8 +622,8 @@ def main() -> None:
         f"Matter: {sess.matter_type} | Accounting: {acct}"
     )
 
-    tab_upload, tab_run, tab_review, tab_export = st.tabs(
-        ["Upload", "Process", "Review", "Export"]
+    tab_upload, tab_extraction, tab_categorization, tab_finalize, tab_review, tab_export = st.tabs(
+        ["Upload", "Extraction", "Categorization", "Finalize", "Review", "Export"]
     )
 
     with tab_upload:
@@ -526,7 +669,7 @@ def main() -> None:
                         ok = False
                 if ok:
                     st.success("Upload complete.")
-                    # Same script run: `stmts` was loaded before this commit; reload so Process/Review see PDFs.
+                    # Same script run: `stmts` was loaded before this commit; reload so other tabs see PDFs.
                     sess, stmts, txns = load_full_session(sid)
         if stmts:
             st.dataframe(
@@ -541,15 +684,17 @@ def main() -> None:
                 ]
             )
 
-    with tab_run:
-        st.subheader("AI pipeline — per statement, then reconciliation")
+    with tab_extraction:
+        st.subheader("Extraction and description review (per statement)")
         st.caption(
-            "For **each** PDF: run **extraction**, compare the source PDF to extracted rows and **approve**, "
-            "then run **categorization** and **approve** with the PDF still in view. "
-            "**Reconciliation** runs once when every statement has completed both approvals."
+            "Run **AI extraction** (rows + automatic description cleanup). Review the PDF against rows, "
+            "edit **Clean description** or mark **Client clarification**, save, then approve when every row "
+            "is resolved (high-confidence AI, staff-reviewed, or sent to client)."
         )
         if not settings.gemini_api_key:
-            st.warning("Set GEMINI_API_KEY in the environment to enable AI extraction and categorization.")
+            st.warning(
+                "Set GEMINI_API_KEY in the environment to enable AI extraction and description cleanup."
+            )
         st.metric("Session stage", sess.status.replace("_", " ").title())
 
         stmt_ids = [s.id for s in stmts if s.pdf_storage_path]
@@ -572,18 +717,18 @@ def main() -> None:
             st.dataframe(overview, use_container_width=True, hide_index=True)
 
             pick = st.selectbox(
-                "Statement to process",
+                "Statement",
                 stmt_ids,
                 format_func=lambda i: next(
                     (f"{s.institution or '—'} — {s.original_filename}" for s in stmts if s.id == i),
                     i,
                 ),
+                key="extraction_pick_stmt",
             )
             cur = next(s for s in stmts if s.id == pick)
             stmt_tx = [t for t in txns if t.statement_id == pick]
             pdf_path = Path(cur.pdf_storage_path) if cur.pdf_storage_path else None
 
-            st.markdown("##### Extraction (this statement)")
             if st.button(
                 "Run AI extraction for this statement",
                 type="primary",
@@ -594,8 +739,36 @@ def main() -> None:
                     run_extraction_for_statement(sid, pick)
                 st.rerun()
 
+            if (
+                cur.extraction_status == "extracted"
+                and stmt_tx
+                and settings.gemini_api_key
+            ):
+                if st.button(
+                    "Re-run AI description cleanup only",
+                    key=f"btn_recln_{pick}",
+                ):
+                    with st.spinner("Cleaning descriptions…"):
+                        run_description_cleanup_for_statement(sid, pick)
+                    st.rerun()
+
             if cur.extraction_status == "extracted" and not cur.extraction_human_approved:
-                st.markdown("**Review extraction** — PDF next to extracted rows.")
+                st.markdown("**Review extraction** — PDF, amounts/dates vs statement, and descriptions.")
+                unresolved = (
+                    [t for t in stmt_tx if not _extraction_description_resolved(t)]
+                    if stmt_tx
+                    else []
+                )
+                if unresolved:
+                    st.warning(
+                        f"{len(unresolved)} transaction(s) still need description review "
+                        "(save edits below, or high AI confidence / client clarification per row)."
+                    )
+                clar_n = sum(1 for t in stmt_tx if t.client_clarification)
+                if clar_n:
+                    st.info(
+                        f"{clar_n} row(s) marked for **client clarification** — listed on **Finalize** for export."
+                    )
                 page_ext = st.number_input(
                     "PDF page", min_value=1, value=1, step=1, key=f"page_ext_{pick}"
                 )
@@ -606,28 +779,96 @@ def main() -> None:
                     else:
                         st.warning("PDF path missing.")
                 with c_rows:
-                    st.dataframe(
-                        [
-                            {
-                                "Date": t.txn_date,
-                                "Description": (t.description or "")[:120],
-                                "Amount": t.amount,
-                                "Page": t.source_page,
-                            }
-                            for t in stmt_tx
-                        ],
-                        use_container_width=True,
-                        hide_index=True,
-                        height=min(400, 80 + 28 * max(len(stmt_tx), 1)),
+                    st.caption(
+                        "Edit **Clean description** and check **Client clarification** as needed, then **Save**."
                     )
+                    if stmt_tx:
+                        ed_h = min(520, 100 + 28 * max(len(stmt_tx), 1))
+                        edited_ex = st.data_editor(
+                            _extraction_review_table_rows(stmt_tx),
+                            key=f"extraction_editor_{pick}",
+                            hide_index=True,
+                            num_rows="fixed",
+                            use_container_width=True,
+                            height=ed_h,
+                            column_config={
+                                "Date": st.column_config.TextColumn(
+                                    "Date", disabled=True, width="small"
+                                ),
+                                "Raw description": st.column_config.TextColumn(
+                                    "Raw description", disabled=True, width="medium"
+                                ),
+                                "AI cleaned": st.column_config.TextColumn(
+                                    "AI cleaned", disabled=True, width="medium"
+                                ),
+                                "Cleanup conf": st.column_config.TextColumn(
+                                    "Cleanup conf", disabled=True, width="small"
+                                ),
+                                "Clean description": st.column_config.TextColumn(
+                                    "Clean description", width="large"
+                                ),
+                                "Client clarification": st.column_config.CheckboxColumn(
+                                    "Client clarification", width="small"
+                                ),
+                            },
+                        )
+                        ex_rows = _data_editor_output_as_rows(edited_ex)
+                        if st.button(
+                            "Save description review",
+                            type="primary",
+                            key=f"save_ext_desc_{pick}",
+                        ):
+                            if len(ex_rows) != len(stmt_tx):
+                                st.error("Row count mismatch — refresh and try again.")
+                            else:
+                                with session_scope() as db:
+                                    for orig, erow in zip(stmt_tx, ex_rows):
+                                        row = db.get(TransactionORM, orig.id)
+                                        if not row:
+                                            continue
+                                        clar = bool(erow.get("Client clarification"))
+                                        clean = str(
+                                            erow.get("Clean description") or ""
+                                        ).strip()
+                                        row.normalized_description = clean or None
+                                        row.client_clarification = clar
+                                        row.description_staff_accepted = not clar
+                                st.success("Saved.")
+                                st.rerun()
+                        if st.button(
+                            "Apply AI cleaned → clean description (high confidence only)",
+                            key=f"apply_ai_hi_{pick}",
+                        ):
+                            with session_scope() as db:
+                                for t in stmt_tx:
+                                    if (t.description_cleanup_confidence or "").lower() != "high":
+                                        continue
+                                    row = db.get(TransactionORM, t.id)
+                                    if (
+                                        row
+                                        and (row.description_ai_cleaned or "").strip()
+                                    ):
+                                        row.normalized_description = (
+                                            row.description_ai_cleaned.strip()
+                                        )
+                                        row.description_staff_accepted = True
+                                        row.client_clarification = False
+                            st.rerun()
+                    else:
+                        st.caption("No transaction rows.")
                     st.caption(f"{len(stmt_tx)} row(s) — compare to the statement PDF.")
                     st.checkbox(
                         "Extracted rows match the PDF for this statement.",
                         key=f"chk_ext_{pick}",
                     )
+                    desc_gate = _statement_descriptions_resolved(stmt_tx)
+                    if not desc_gate and stmt_tx:
+                        st.caption("Approve is disabled until every row passes description review rules above.")
                     if st.button(
                         "Approve extraction for this statement",
-                        disabled=not st.session_state.get(f"chk_ext_{pick}", False),
+                        disabled=not (
+                            st.session_state.get(f"chk_ext_{pick}", False) and desc_gate
+                        ),
                         key=f"btn_ap_ext_{pick}",
                     ):
                         with session_scope() as db:
@@ -640,35 +881,60 @@ def main() -> None:
             elif str(cur.extraction_status).startswith("error"):
                 st.error(f"Extraction error: {cur.extraction_status}")
 
-            st.markdown("##### Categorization (this statement)")
+    with tab_categorization:
+        st.subheader("Categorization (per statement)")
+        st.caption(
+            "After **Extraction** is approved for a statement, run **AI categorization** and approve schedules. "
+            "Use **Review** for deeper edits after **Finalize** reconciliation is approved."
+        )
+        if not settings.gemini_api_key:
+            st.warning("Set GEMINI_API_KEY in the environment to enable AI categorization.")
+
+        stmt_ids_cat = [s.id for s in stmts if s.pdf_storage_path]
+        if not stmt_ids_cat:
+            st.info("Upload at least one PDF on the **Upload** tab.")
+        else:
+            pick_c = st.selectbox(
+                "Statement",
+                stmt_ids_cat,
+                format_func=lambda i: next(
+                    (f"{s.institution or '—'} — {s.original_filename}" for s in stmts if s.id == i),
+                    i,
+                ),
+                key="categorization_pick_stmt",
+            )
+            cur_c = next(s for s in stmts if s.id == pick_c)
+            stmt_tx_c = [t for t in txns if t.statement_id == pick_c]
+            pdf_path_c = Path(cur_c.pdf_storage_path) if cur_c.pdf_storage_path else None
+
             cat_disabled = (
-                not cur.extraction_human_approved
-                or cur.extraction_status != "extracted"
+                not cur_c.extraction_human_approved
+                or cur_c.extraction_status != "extracted"
                 or not settings.gemini_api_key
             )
             if st.button(
                 "Run AI categorization for this statement",
                 type="primary",
                 disabled=cat_disabled,
-                key=f"btn_cat_{pick}",
+                key=f"btn_cat_{pick_c}",
             ):
                 with st.spinner("Categorizing…"):
-                    run_categorization_for_statement(sid, pick)
+                    run_categorization_for_statement(sid, pick_c)
                 st.rerun()
 
-            if cur.categorization_ai_done and not cur.categorization_human_approved:
+            if cur_c.categorization_ai_done and not cur_c.categorization_human_approved:
                 st.markdown("**Review categorization** — PDF and suggested schedules.")
                 page_cat = st.number_input(
                     "PDF page",
                     min_value=1,
                     value=1,
                     step=1,
-                    key=f"page_cat_{pick}",
+                    key=f"page_cat_{pick_c}",
                 )
                 c_pdf2, c_rows2 = st.columns(2)
                 with c_pdf2:
-                    if pdf_path and pdf_path.exists():
-                        render_pdf_html(pdf_path, int(page_cat))
+                    if pdf_path_c and pdf_path_c.exists():
+                        render_pdf_html(pdf_path_c, int(page_cat))
                     else:
                         st.warning("PDF path missing.")
                 with c_rows2:
@@ -676,45 +942,78 @@ def main() -> None:
                         [
                             {
                                 "Date": t.txn_date,
-                                "Description": (t.description or "")[:100],
+                                "Description": (
+                                    (_effective_description_for_category(t) or "")[:100]
+                                ),
                                 "Amount": t.amount,
                                 "Schedule": t.schedule,
                                 "Confidence": t.confidence,
                             }
-                            for t in stmt_tx
+                            for t in stmt_tx_c
                         ],
                         use_container_width=True,
                         hide_index=True,
-                        height=min(400, 80 + 28 * max(len(stmt_tx), 1)),
+                        height=min(400, 80 + 28 * max(len(stmt_tx_c), 1)),
                     )
                     st.checkbox(
                         "Schedules look reasonable for this statement (use Review tab to edit cells).",
-                        key=f"chk_cat_{pick}",
+                        key=f"chk_cat_{pick_c}",
                     )
                     if st.button(
                         "Approve categorization for this statement",
-                        disabled=not st.session_state.get(f"chk_cat_{pick}", False),
-                        key=f"btn_ap_cat_{pick}",
+                        disabled=not st.session_state.get(f"chk_cat_{pick_c}", False),
+                        key=f"btn_ap_cat_{pick_c}",
                     ):
                         with session_scope() as db:
-                            row_s = db.get(StatementORM, pick)
+                            row_s = db.get(StatementORM, pick_c)
                             if row_s:
                                 row_s.categorization_human_approved = True
                         st.rerun()
-            elif cur.categorization_human_approved:
+            elif cur_c.categorization_human_approved:
                 st.success("Categorization approved for this statement ✓")
+            elif not cur_c.extraction_human_approved:
+                st.info("Approve **Extraction** for this statement first.")
+
+    with tab_finalize:
+        st.subheader("Finalize session — combine data and reconcile")
+        st.caption(
+            "When **every** statement has extraction + categorization approved, run **reconciliation** "
+            "to combine data across statements. Then approve reconciliation to unlock **Review** and **Export**."
+        )
+        st.metric("Session stage", sess.status.replace("_", " ").title())
+
+        stmt_ids_f = [s.id for s in stmts if s.pdf_storage_path]
+        clar_rows = _client_clarification_export_rows(txns, stmts)
+        if clar_rows:
+            st.markdown("##### Client clarification list")
+            st.dataframe(clar_rows, use_container_width=True, hide_index=True)
+            buf = io.StringIO()
+            if clar_rows:
+                w = csv.DictWriter(buf, fieldnames=list(clar_rows[0].keys()))
+                w.writeheader()
+                w.writerows(clar_rows)
+            st.download_button(
+                "Download client clarification CSV",
+                data=buf.getvalue().encode("utf-8"),
+                file_name=f"client_clarification_{sid[:8]}.csv",
+                mime="text/csv",
+                key="dl_client_clar_csv",
+            )
+        else:
+            st.caption("No transactions marked for client clarification.")
 
         st.divider()
-        st.markdown("##### Reconciliation (session — all statements must be done)")
+        st.markdown("##### Reconciliation (all statements must be complete)")
         recon_ready = all_statements_ready_for_reconciliation(stmts)
-        if not recon_ready and stmt_ids:
+        if not recon_ready and stmt_ids_f:
             st.info(
-                "Complete extraction + approval and categorization + approval for **each** statement above first."
+                "Complete **Extraction** + **Categorization** (with approvals) for **each** statement first."
             )
         if st.button(
             "Run reconciliation for entire session",
             type="primary",
             disabled=not recon_ready,
+            key="btn_recon_session",
         ):
             if not all_statements_ready_for_reconciliation(stmts):
                 st.error(
@@ -744,6 +1043,7 @@ def main() -> None:
             if st.button(
                 "Approve reconciliation → line-by-line verification",
                 disabled=not st.session_state.get(f"approve_rec_{sid}", False),
+                key="btn_appr_rec",
             ):
                 with session_scope() as db:
                     row = db.get(AccountingSessionORM, sid)
@@ -756,8 +1056,10 @@ def main() -> None:
 
         if is_admin_user(user):
             with st.expander("Admin: skip review gates (dev only)"):
-                st.caption("Marks every statement approved and sets session to **pending_review**.")
-                if st.button("Force all statement approvals + pending_review"):
+                st.caption(
+                    "Marks every statement approved, all description rows staff-accepted, session **pending_review**."
+                )
+                if st.button("Force all statement approvals + pending_review", key="adm_force"):
                     with session_scope() as db:
                         row = db.get(AccountingSessionORM, sid)
                         if row:
@@ -766,6 +1068,13 @@ def main() -> None:
                                     s.extraction_human_approved = True
                                     s.categorization_ai_done = True
                                     s.categorization_human_approved = True
+                            for t in (
+                                db.query(TransactionORM)
+                                .join(StatementORM)
+                                .filter(StatementORM.session_id == sid)
+                                .all()
+                            ):
+                                t.description_staff_accepted = True
                             if row.status not in (ST_DRAFT, ST_COMPLETED):
                                 row.status = ST_PENDING_REVIEW
                     st.rerun()
@@ -774,8 +1083,9 @@ def main() -> None:
     with tab_review:
         if sess.status in (ST_DRAFT, ST_PROCESSING, ST_RECONCILIATION_COMPLETE):
             st.info(
-                "Use **Process** for PDF + extracted rows (extraction) and PDF + schedules (categorization). "
-                "This tab is for deeper edits. Complete **Process** through reconciliation approval before export."
+                "Use **Extraction** and **Categorization** for per-statement PDF review, then **Finalize** "
+                "for reconciliation. This tab is for deeper edits. Complete **Finalize** through reconciliation "
+                "approval before export."
             )
         elif sess.status == ST_PENDING_REVIEW:
             st.success(

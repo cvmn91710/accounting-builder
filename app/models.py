@@ -53,6 +53,22 @@ class ConfidenceLevel(str, Enum):
     low = "low"
 
 
+# --- Stage 1b: description cleanup (post-extraction; uses ConfidenceLevel) ---
+
+
+class DescriptionCleanupItem(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    transaction_id: str = Field(alias="transactionId")
+    cleaned_description: Optional[str] = Field(default=None, alias="cleanedDescription")
+    confidence: ConfidenceLevel = ConfidenceLevel.medium
+    reasoning: Optional[str] = None
+
+
+class DescriptionCleanupResult(BaseModel):
+    cleanups: list[DescriptionCleanupItem] = Field(default_factory=list)
+
+
 class CategorizationItem(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 

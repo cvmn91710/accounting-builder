@@ -115,6 +115,14 @@ class TransactionORM(Base):
     verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     verified_by: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
 
+    description_ai_cleaned: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    description_cleanup_confidence: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True
+    )
+    description_cleanup_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    description_staff_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
+    client_clarification: Mapped[bool] = mapped_column(Boolean, default=False)
+
     statement: Mapped["StatementORM"] = relationship(back_populates="transactions")
 
 
@@ -164,6 +172,21 @@ def _migrate_sqlite_schema(engine) -> None:
                         "ALTER TABLE transactions ADD COLUMN normalized_description TEXT"
                     )
                 )
+        tcols = {c["name"] for c in inspect(engine).get_columns("transactions")}
+        desc_adds = []
+        if "description_ai_cleaned" not in tcols:
+            desc_adds.append("description_ai_cleaned TEXT")
+        if "description_cleanup_confidence" not in tcols:
+            desc_adds.append("description_cleanup_confidence VARCHAR(16)")
+        if "description_cleanup_reasoning" not in tcols:
+            desc_adds.append("description_cleanup_reasoning TEXT")
+        if "description_staff_accepted" not in tcols:
+            desc_adds.append("description_staff_accepted BOOLEAN DEFAULT 0")
+        if "client_clarification" not in tcols:
+            desc_adds.append("client_clarification BOOLEAN DEFAULT 0")
+        for ddl in desc_adds:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE transactions ADD COLUMN {ddl}"))
     insp = inspect(engine)
     if insp.has_table("statements"):
         scols = {c["name"] for c in insp.get_columns("statements")}

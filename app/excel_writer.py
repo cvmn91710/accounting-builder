@@ -179,6 +179,7 @@ def _generate_legacy(
         written_row,
         verifier_email,
     )
+    _append_client_clarification_sheet(wb, transactions, statement_by_id)
 
     return _save_workbook(wb, matter_name, period_start, period_end)
 
@@ -256,6 +257,45 @@ def _append_audit_legacy(
             audit_sheet.cell(row=audit_row, column=c, value=val)
         audit_row += 1
     audit_sheet.sheet_state = "hidden"
+
+
+def _append_client_clarification_sheet(
+    wb: Workbook,
+    transactions: list[dict[str, Any]],
+    statement_by_id: dict[str, dict[str, Any]],
+) -> None:
+    rows = [t for t in transactions if t.get("client_clarification")]
+    if not rows:
+        return
+    ws = wb.create_sheet("Client clarification")
+    headers = [
+        "Date",
+        "Amount",
+        "Raw description",
+        "AI cleaned",
+        "Notes",
+        "Statement file",
+        "Account last4",
+    ]
+    for c, h in enumerate(headers, start=1):
+        ws.cell(row=1, column=c, value=h).font = Font(bold=True)
+    r = 2
+    for t in sorted(rows, key=lambda x: (x.get("statement_id") or "", x.get("id") or "")):
+        st = statement_by_id.get(t.get("statement_id") or "", {})
+        d = t.get("txn_date")
+        ws.cell(row=r, column=1, value=_txn_date_for_cell(d) if d else None)
+        amt = t.get("amount")
+        ws.cell(
+            row=r,
+            column=2,
+            value=float(amt) if amt is not None else None,
+        )
+        ws.cell(row=r, column=3, value=t.get("description") or "")
+        ws.cell(row=r, column=4, value=t.get("description_ai_cleaned") or "")
+        ws.cell(row=r, column=5, value=t.get("notes") or "")
+        ws.cell(row=r, column=6, value=st.get("original_filename") or "")
+        ws.cell(row=r, column=7, value=st.get("account_last4") or "")
+        r += 1
 
 
 def _mmddyy(d: date) -> str:
@@ -719,6 +759,7 @@ def _generate_v12(
         written_row,
         verifier_email,
     )
+    _append_client_clarification_sheet(wb, transactions, statement_by_id)
 
     return _save_workbook(wb, matter_name, period_start, period_end)
 
