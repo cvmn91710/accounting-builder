@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import time
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
 
@@ -46,6 +45,7 @@ Rules:
 - Return ONLY valid JSON — no markdown, no preamble. Use null for unknown fields; do not invent amounts.
 - If the document clearly lists transactions but you return none, add a flag explaining why.
 - If unsure about a field, use null and add a short note to flags[].
+- Use JSON only: null (not NaN, not None, not undefined), true/false (not True/False), no trailing commas.
 
 JSON shape:
 {
@@ -78,12 +78,35 @@ Statement text and tables:
 """
 
 
+# Large statements need headroom; 8192 often truncates mid-JSON (unterminated strings).
+_MAX_EXTRACT_OUTPUT_TOKENS = 65536
+
+
 def _strip_json_fence(raw: str) -> str:
     s = raw.strip()
     if s.startswith("```"):
         s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
         s = re.sub(r"\s*```$", "", s)
     return s.strip()
+
+
+def _sanitize_gemini_json(s: str) -> str:
+    """Repair common non-standard JSON emitted by models (still invalid for json.loads)."""
+    out = s
+    out = re.sub(r"\bNaN\b", "null", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bInfinity\b", "null", out)
+    out = re.sub(r"\b-Infinity\b", "null", out)
+    out = re.sub(r"\bNone\b", "null", out)
+    out = re.sub(r"\bTrue\b", "true", out)
+    out = re.sub(r"\bFalse\b", "false", out)
+    out = re.sub(r"\bundefined\b", "null", out)
+    out = re.sub(r":\s*,", ": null,", out)
+    for _ in range(12):
+        nxt = re.sub(r",(\s*[\]}])", r"\1", out)
+        if nxt == out:
+            break
+        out = nxt
+    return out
 
 
 def _tables_likely_full_ledger(tables_text: str) -> bool:
@@ -103,7 +126,7 @@ def _debug_session_ndjson(
     hypothesis_id: str, location: str, message: str, data: dict[str, Any]
 ) -> None:
     # #region agent log
-    path = Path(__file__).resolve().parent.parent / "debug-7da9e7.log"
+    roots = {Path(__file__).resolve().parent.parent, Path.cwd()}
     payload = {
         "sessionId": "7da9e7",
         "hypothesisId": hypothesis_id,
@@ -112,11 +135,13 @@ def _debug_session_ndjson(
         "data": data,
         "timestamp": int(time.time() * 1000),
     }
-    try:
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
+    line = json.dumps(payload, default=str) + "\n"
+    for root in roots:
+        try:
+            with (root / "debug-7da9e7.log").open("a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
     # #endregion
 
 
@@ -182,7 +207,7 @@ def extract_statement_with_gemini(combined_text: str, tables_text: str) -> Extra
             body,
             generation_config=genai.types.GenerationConfig(
                 temperature=0,
-                max_output_tokens=8192,
+                max_output_tokens=_MAX_EXTRACT_OUTPUT_TOKENS,
                 response_mime_type="application/json",
             ),
         )
@@ -207,7 +232,7 @@ def extract_statement_with_gemini(combined_text: str, tables_text: str) -> Extra
         "gemini_extractor.py:post_response",
         "before_json_loads",
         {
-            "max_output_tokens": 8192,
+            "max_output_tokens": _MAX_EXTRACT_OUTPUT_TOKENS,
             "response_text_len": len(response.text or ""),
             "raw_after_fence_len": len(raw_stripped),
             "finish_reason": fr,
@@ -217,40 +242,60 @@ def extract_statement_with_gemini(combined_text: str, tables_text: str) -> Extra
         },
     )
     # #endregion
-    try:
-        data = json.loads(raw_stripped)
-    except json.JSONDecodeError as e:
-        pos = getattr(e, "pos", None)
+
+    def _log_json_err(
+        err: json.JSONDecodeError, payload: str, tag: str
+    ) -> None:
+        pos = getattr(err, "pos", None)
         snip = ""
-        if isinstance(pos, int) and raw_stripped:
+        if isinstance(pos, int) and payload:
             lo = max(0, pos - 100)
-            hi = min(len(raw_stripped), pos + 100)
-            snip = raw_stripped[lo:hi]
-        # #region agent log
+            hi = min(len(payload), pos + 100)
+            snip = payload[lo:hi]
         _debug_session_ndjson(
             "H2",
             "gemini_extractor.py:json_loads",
-            "JSONDecodeError",
+            tag,
             {
-                "error": str(e),
+                "error": str(err),
                 "pos": pos,
-                "lineno": getattr(e, "lineno", None),
-                "colno": getattr(e, "colno", None),
+                "lineno": getattr(err, "lineno", None),
+                "colno": getattr(err, "colno", None),
                 "finish_reason": fr,
-                "raw_len": len(raw_stripped),
+                "raw_len": len(payload),
                 "snippet_around_pos": snip,
-                "suffix_400": raw_stripped[-400:] if raw_stripped else "",
+                "suffix_400": payload[-400:] if payload else "",
             },
         )
-        # #endregion
-        raise
+
+    data: Optional[dict[str, Any]] = None
+    parse_mode = "direct"
+    try:
+        data = json.loads(raw_stripped)
+    except json.JSONDecodeError as e_first:
+        _log_json_err(e_first, raw_stripped, "JSONDecodeError_first_pass")
+        sanitized = _sanitize_gemini_json(raw_stripped)
+        try:
+            data = json.loads(sanitized)
+            parse_mode = "sanitized"
+            _debug_session_ndjson(
+                "H2",
+                "gemini_extractor.py:json_loads",
+                "recovered_after_sanitize",
+                {"finish_reason": fr, "sanitized_len": len(sanitized)},
+            )
+        except json.JSONDecodeError as e2:
+            _log_json_err(e2, sanitized, "JSONDecodeError_after_sanitize")
+            raise e2 from e_first
     # #region agent log
+    assert data is not None
     _debug_session_ndjson(
         "H5",
         "gemini_extractor.py:json_loads",
         "json_ok",
         {
-            "txn_count": len((data or {}).get("transactions") or []),
+            "parse_mode": parse_mode,
+            "txn_count": len(data.get("transactions") or []),
             "finish_reason": fr,
         },
     )
