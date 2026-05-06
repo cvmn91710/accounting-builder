@@ -19,6 +19,7 @@ class ExtractedTransaction(BaseModel):
     # Use datetime.date (not `date`) so the field name `date` does not shadow the type.
     date: Optional[datetime.date] = None
     description: Optional[str] = None
+    payee: Optional[str] = None
     amount: Optional[Decimal] = None
     txn_type: Optional[str] = Field(default=None, alias="type")
     balance: Optional[Decimal] = None

@@ -35,7 +35,8 @@ Rules:
 - Many checking statements (e.g. Wells Fargo) use TWO amount columns: "Deposits/Additions" and "Withdrawals/Subtractions" (or similar). For each row:
   - If only one column has a value, set "amount" to that number, NEGATIVE for withdrawals/subtractions, POSITIVE for deposits/credits.
   - If both columns could apply, use deposit as positive and withdrawal as negative (one transaction row = one net movement).
-- "amount" must be a single number per row when possible. "description" = text from the description/payee column as printed.
+- "amount" must be a single number per row when possible. "description" = full transaction description line as printed (all narrative text for the row).
+- "payee" = counterparty / merchant / payee name when the statement shows it as a separate field OR when it can be inferred clearly from the description (e.g. leading name before a long reference string). Use null if there is no distinct payee or it would be a guess.
 - Check number column: if present, you may prepend to description (e.g. "Check 1234 — ...") or omit if it breaks JSON; do not skip the row.
 - For each transaction: type (debit/credit/transfer/check/etc.), running balance in "balance" if a balance column exists, sourcePage = 1-based page from the TABLES or TEXT label (e.g. "Page 3 table 1" => 3).
 - For brokerage: also security symbol, quantity, price, cost basis if present.
@@ -57,6 +58,7 @@ JSON shape:
     {
       "date": "YYYY-MM-DD"|null,
       "description": string|null,
+      "payee": string|null,
       "amount": number|null,
       "type": string|null,
       "balance": number|null,

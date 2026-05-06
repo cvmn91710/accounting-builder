@@ -93,6 +93,9 @@ class TransactionORM(Base):
     statement_id: Mapped[str] = mapped_column(String(36), ForeignKey("statements.id"))
     txn_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    payee: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    payee_normalized: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    payee_staff_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
     amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     txn_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     balance_after: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
@@ -184,6 +187,12 @@ def _migrate_sqlite_schema(engine) -> None:
             desc_adds.append("description_staff_accepted BOOLEAN DEFAULT 0")
         if "client_clarification" not in tcols:
             desc_adds.append("client_clarification BOOLEAN DEFAULT 0")
+        if "payee" not in tcols:
+            desc_adds.append("payee TEXT")
+        if "payee_normalized" not in tcols:
+            desc_adds.append("payee_normalized TEXT")
+        if "payee_staff_accepted" not in tcols:
+            desc_adds.append("payee_staff_accepted BOOLEAN DEFAULT 0")
         for ddl in desc_adds:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE transactions ADD COLUMN {ddl}"))

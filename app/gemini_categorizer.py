@@ -51,6 +51,7 @@ Schedule definitions:
 {schedules_prompt_block()}
 
 Tasks:
+- Each transaction may include **payee** (counterparty) when provided — use it with **description** for classification.
 - Assign each transaction to exactly one schedule letter from the firm's template scheme, OR use special values:
   - Standard sheets (always in master workbook): {", ".join(sorted(STANDARD_SCHEDULE_LETTERS))}.
   - Ad-hoc sheets (only when facts warrant — prefer standard schedules when they fit): {", ".join(sorted(AD_HOC_SCHEDULE_LETTERS))}.

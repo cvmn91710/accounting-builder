@@ -111,10 +111,35 @@ def _extraction_description_resolved(t: TransactionORM) -> bool:
     return False
 
 
+def _effective_payee(t: TransactionORM) -> Optional[str]:
+    if (t.payee_normalized or "").strip():
+        return (t.payee_normalized or "").strip()
+    if (t.payee or "").strip():
+        return (t.payee or "").strip()
+    return None
+
+
+def _extraction_payee_resolved(t: TransactionORM) -> bool:
+    if t.client_clarification:
+        return True
+    if not (t.payee or "").strip() and not (t.payee_normalized or "").strip():
+        return True
+    return bool(t.payee_staff_accepted)
+
+
 def _statement_descriptions_resolved(stmt_tx: list[TransactionORM]) -> bool:
     if not stmt_tx:
         return True
     return all(_extraction_description_resolved(t) for t in stmt_tx)
+
+
+def _statement_extraction_review_resolved(stmt_tx: list[TransactionORM]) -> bool:
+    if not stmt_tx:
+        return True
+    return all(
+        _extraction_description_resolved(t) and _extraction_payee_resolved(t)
+        for t in stmt_tx
+    )
 
 
 def _apply_description_cleanup_to_rows(
@@ -234,6 +259,7 @@ def run_extraction_for_statement(session_id: str, statement_id: str) -> None:
                     statement_id=stt.id,
                     txn_date=ta.get("date"),
                     description=ta.get("description"),
+                    payee=ta.get("payee"),
                     amount=ta.get("amount"),
                     txn_type=ta.get("txn_type"),
                     balance_after=ta.get("balance"),
@@ -251,6 +277,7 @@ def run_extraction_for_statement(session_id: str, statement_id: str) -> None:
                     for r in new_rows:
                         r.description_staff_accepted = False
                         r.client_clarification = False
+                        r.payee_staff_accepted = False
                 except Exception as e:
                     st.warning(
                         f"**{stt.original_filename}**: description cleanup failed "
@@ -293,6 +320,7 @@ def run_categorization_for_statement(session_id: str, statement_id: str) -> None
                     "transactionId": t.id,
                     "date": t.txn_date.isoformat() if t.txn_date else None,
                     "description": _effective_description_for_category(t),
+                    "payee": _effective_payee(t),
                     "amount": str(t.amount) if t.amount is not None else None,
                     "type": t.txn_type,
                     "institution": next(
@@ -371,6 +399,10 @@ def _transaction_to_dict(t: TransactionORM) -> dict[str, Any]:
         "verified_at": t.verified_at,
         "verified_by": t.verified_by,
         "normalized_description": t.normalized_description,
+        "payee": _effective_payee(t),
+        "payee_raw": t.payee,
+        "payee_normalized": t.payee_normalized,
+        "payee_staff_accepted": t.payee_staff_accepted,
         "description_ai_cleaned": t.description_ai_cleaned,
         "description_cleanup_confidence": t.description_cleanup_confidence,
         "description_cleanup_reasoning": t.description_cleanup_reasoning,
@@ -430,9 +462,13 @@ def _extraction_review_table_rows(stmt_tx: list[TransactionORM]) -> list[dict[st
         ai = (t.description_ai_cleaned or "").strip()
         conf = ((t.description_cleanup_confidence or "—").strip() or "—")
         default_clean = (t.normalized_description or "").strip() or ai or raw
+        ext_payee = (t.payee or "").strip()
+        payee_review = (t.payee_normalized or "").strip() or ext_payee
         rows.append(
             {
                 "Date": t.txn_date.isoformat() if t.txn_date else "",
+                "Extracted payee": ext_payee if len(ext_payee) <= 200 else ext_payee[:197] + "…",
+                "Payee (review)": payee_review,
                 "Raw description": raw if len(raw) <= 800 else raw[:797] + "…",
                 "AI cleaned": ai if len(ai) <= 800 else ai[:797] + "…",
                 "Cleanup conf": conf,
@@ -456,6 +492,8 @@ def _client_clarification_export_rows(
             {
                 "Date": t.txn_date.isoformat() if t.txn_date else "",
                 "Amount": float(t.amount) if t.amount is not None else None,
+                "Extracted payee": (t.payee or "")[:500],
+                "Payee (review)": (t.payee_normalized or "")[:500],
                 "Raw description": (t.description or "")[:2000],
                 "AI cleaned": (t.description_ai_cleaned or "")[:2000],
                 "Cleanup confidence": t.description_cleanup_confidence or "",
@@ -753,16 +791,28 @@ def main() -> None:
                     st.rerun()
 
             if cur.extraction_status == "extracted" and not cur.extraction_human_approved:
-                st.markdown("**Review extraction** — PDF, amounts/dates vs statement, and descriptions.")
-                unresolved = (
+                st.markdown(
+                    "**Review extraction** — PDF, amounts/dates vs statement, **payee**, and **descriptions**."
+                )
+                unresolved_desc = (
                     [t for t in stmt_tx if not _extraction_description_resolved(t)]
                     if stmt_tx
                     else []
                 )
-                if unresolved:
+                unresolved_payee = (
+                    [t for t in stmt_tx if not _extraction_payee_resolved(t)]
+                    if stmt_tx
+                    else []
+                )
+                if unresolved_desc:
                     st.warning(
-                        f"{len(unresolved)} transaction(s) still need description review "
-                        "(save edits below, or high AI confidence / client clarification per row)."
+                        f"{len(unresolved_desc)} transaction(s) still need **description** review "
+                        "(save below, or high AI cleanup confidence / client clarification per row)."
+                    )
+                if unresolved_payee:
+                    st.warning(
+                        f"{len(unresolved_payee)} transaction(s) still need **payee** review "
+                        "(edit **Payee (review)** and save, use **Accept extracted payees**, or client clarification)."
                     )
                 clar_n = sum(1 for t in stmt_tx if t.client_clarification)
                 if clar_n:
@@ -780,7 +830,8 @@ def main() -> None:
                         st.warning("PDF path missing.")
                 with c_rows:
                     st.caption(
-                        "Edit **Clean description** and check **Client clarification** as needed, then **Save**."
+                        "Edit **Payee (review)** and **Clean description**; check **Client clarification** as needed, "
+                        "then **Save description review**."
                     )
                     if stmt_tx:
                         ed_h = min(520, 100 + 28 * max(len(stmt_tx), 1))
@@ -794,6 +845,12 @@ def main() -> None:
                             column_config={
                                 "Date": st.column_config.TextColumn(
                                     "Date", disabled=True, width="small"
+                                ),
+                                "Extracted payee": st.column_config.TextColumn(
+                                    "Extracted payee", disabled=True, width="small"
+                                ),
+                                "Payee (review)": st.column_config.TextColumn(
+                                    "Payee (review)", width="medium"
                                 ),
                                 "Raw description": st.column_config.TextColumn(
                                     "Raw description", disabled=True, width="medium"
@@ -833,8 +890,26 @@ def main() -> None:
                                         row.normalized_description = clean or None
                                         row.client_clarification = clar
                                         row.description_staff_accepted = not clar
+                                        payee_rev = str(
+                                            erow.get("Payee (review)") or ""
+                                        ).strip()
+                                        row.payee_normalized = payee_rev or None
+                                        row.payee_staff_accepted = not clar
                                 st.success("Saved.")
                                 st.rerun()
+                        if st.button(
+                            "Accept extracted payees → Payee (review) and mark reviewed",
+                            key=f"accept_payees_{pick}",
+                        ):
+                            with session_scope() as db:
+                                for t in stmt_tx:
+                                    row = db.get(TransactionORM, t.id)
+                                    if not row or not (row.payee or "").strip():
+                                        continue
+                                    if not (row.payee_normalized or "").strip():
+                                        row.payee_normalized = (row.payee or "").strip()
+                                    row.payee_staff_accepted = True
+                            st.rerun()
                         if st.button(
                             "Apply AI cleaned → clean description (high confidence only)",
                             key=f"apply_ai_hi_{pick}",
@@ -861,13 +936,15 @@ def main() -> None:
                         "Extracted rows match the PDF for this statement.",
                         key=f"chk_ext_{pick}",
                     )
-                    desc_gate = _statement_descriptions_resolved(stmt_tx)
-                    if not desc_gate and stmt_tx:
-                        st.caption("Approve is disabled until every row passes description review rules above.")
+                    review_gate = _statement_extraction_review_resolved(stmt_tx)
+                    if not review_gate and stmt_tx:
+                        st.caption(
+                            "Approve is disabled until every row passes **description** and **payee** review rules."
+                        )
                     if st.button(
                         "Approve extraction for this statement",
                         disabled=not (
-                            st.session_state.get(f"chk_ext_{pick}", False) and desc_gate
+                            st.session_state.get(f"chk_ext_{pick}", False) and review_gate
                         ),
                         key=f"btn_ap_ext_{pick}",
                     ):
@@ -942,6 +1019,7 @@ def main() -> None:
                         [
                             {
                                 "Date": t.txn_date,
+                                "Payee": ((_effective_payee(t) or "")[:80]),
                                 "Description": (
                                     (_effective_description_for_category(t) or "")[:100]
                                 ),
@@ -1057,7 +1135,7 @@ def main() -> None:
         if is_admin_user(user):
             with st.expander("Admin: skip review gates (dev only)"):
                 st.caption(
-                    "Marks every statement approved, all description rows staff-accepted, session **pending_review**."
+                    "Marks every statement approved; all description + payee rows staff-accepted; session **pending_review**."
                 )
                 if st.button("Force all statement approvals + pending_review", key="adm_force"):
                     with session_scope() as db:
@@ -1075,6 +1153,7 @@ def main() -> None:
                                 .all()
                             ):
                                 t.description_staff_accepted = True
+                                t.payee_staff_accepted = True
                             if row.status not in (ST_DRAFT, ST_COMPLETED):
                                 row.status = ST_PENDING_REVIEW
                     st.rerun()
@@ -1153,8 +1232,8 @@ def main() -> None:
                     st.warning("PDF file missing on disk.")
             with table_col:
                 st.caption(
-                    "Table: extracted **Date / Description / Amount** (read-only), AI **Category** + **AI conf**, "
-                    "then your **Subcategory**, **Normalized**, **Notes**, **Verified**, **Excluded**. "
+                    "Table: **Date / Description / Payee / Amount** (read-only except Payee + Normalized), "
+                    "AI **Category** + **AI conf**, **Subcategory**, **Normalized**, **Notes**, **Verified**, **Excluded**. "
                     "Edit cells, then **Save changes**."
                 )
                 if not right_tx:
@@ -1174,6 +1253,7 @@ def main() -> None:
                             "Description": st.column_config.TextColumn(
                                 "Description", disabled=True, width="large"
                             ),
+                            "Payee": st.column_config.TextColumn("Payee", width="medium"),
                             "Amount": st.column_config.NumberColumn(
                                 "Amount", disabled=True, format="$%.2f", width="small"
                             ),
@@ -1216,6 +1296,9 @@ def main() -> None:
                                     )
                                     row.normalized_description = (
                                         str(erow.get("Normalized") or "").strip() or None
+                                    )
+                                    row.payee_normalized = (
+                                        str(erow.get("Payee") or "").strip() or None
                                     )
                                     row.notes = (str(erow.get("Notes") or "").strip() or None)
                                     row.excluded = bool(erow.get("Excluded"))
@@ -1321,6 +1404,7 @@ def _review_tx_table_rows(right_tx: list[TransactionORM]) -> list[dict[str, Any]
             {
                 "Date": t.txn_date.isoformat() if t.txn_date else "",
                 "Description": desc,
+                "Payee": _effective_payee(t) or "",
                 "Amount": float(t.amount) if t.amount is not None else None,
                 "Pg": int(t.source_page) if t.source_page is not None else None,
                 "Category": _schedule_value_for_editor(t.schedule),

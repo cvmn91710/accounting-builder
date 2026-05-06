@@ -271,6 +271,8 @@ def _append_client_clarification_sheet(
     headers = [
         "Date",
         "Amount",
+        "Extracted payee",
+        "Payee review",
         "Raw description",
         "AI cleaned",
         "Notes",
@@ -290,11 +292,13 @@ def _append_client_clarification_sheet(
             column=2,
             value=float(amt) if amt is not None else None,
         )
-        ws.cell(row=r, column=3, value=t.get("description") or "")
-        ws.cell(row=r, column=4, value=t.get("description_ai_cleaned") or "")
-        ws.cell(row=r, column=5, value=t.get("notes") or "")
-        ws.cell(row=r, column=6, value=st.get("original_filename") or "")
-        ws.cell(row=r, column=7, value=st.get("account_last4") or "")
+        ws.cell(row=r, column=3, value=t.get("payee_raw") or t.get("payee") or "")
+        ws.cell(row=r, column=4, value=t.get("payee_normalized") or "")
+        ws.cell(row=r, column=5, value=t.get("description") or "")
+        ws.cell(row=r, column=6, value=t.get("description_ai_cleaned") or "")
+        ws.cell(row=r, column=7, value=t.get("notes") or "")
+        ws.cell(row=r, column=8, value=st.get("original_filename") or "")
+        ws.cell(row=r, column=9, value=st.get("account_last4") or "")
         r += 1
 
 
