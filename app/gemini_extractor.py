@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from decimal import Decimal
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 import google.generativeai as genai
 
@@ -97,6 +99,37 @@ def _tables_likely_full_ledger(tables_text: str) -> bool:
     return pipe_rows >= 10
 
 
+def _debug_session_ndjson(
+    hypothesis_id: str, location: str, message: str, data: dict[str, Any]
+) -> None:
+    # #region agent log
+    path = Path(__file__).resolve().parent.parent / "debug-7da9e7.log"
+    payload = {
+        "sessionId": "7da9e7",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+
+def _response_finish_reason(response: Any) -> Optional[str]:
+    try:
+        cands = getattr(response, "candidates", None) or []
+        if cands:
+            return str(getattr(cands[0], "finish_reason", None))
+    except Exception:
+        pass
+    return None
+
+
 def _coerce_extraction_dict(data: dict[str, Any]) -> dict[str, Any]:
     """Normalize keys for Pydantic."""
     txns = data.get("transactions") or []
@@ -166,7 +199,61 @@ def extract_statement_with_gemini(combined_text: str, tables_text: str) -> Extra
         raise
     # #endregion
     raw = response.text or "{}"
-    raw = _strip_json_fence(raw)
-    data = json.loads(raw)
+    raw_stripped = _strip_json_fence(raw)
+    fr = _response_finish_reason(response)
+    # #region agent log
+    _debug_session_ndjson(
+        "H1",
+        "gemini_extractor.py:post_response",
+        "before_json_loads",
+        {
+            "max_output_tokens": 8192,
+            "response_text_len": len(response.text or ""),
+            "raw_after_fence_len": len(raw_stripped),
+            "finish_reason": fr,
+            "starts_with_brace": (raw_stripped[:1] == "{"),
+            "prefix_200": (raw_stripped[:200] if raw_stripped else ""),
+            "suffix_200": (raw_stripped[-200:] if raw_stripped else ""),
+        },
+    )
+    # #endregion
+    try:
+        data = json.loads(raw_stripped)
+    except json.JSONDecodeError as e:
+        pos = getattr(e, "pos", None)
+        snip = ""
+        if isinstance(pos, int) and raw_stripped:
+            lo = max(0, pos - 100)
+            hi = min(len(raw_stripped), pos + 100)
+            snip = raw_stripped[lo:hi]
+        # #region agent log
+        _debug_session_ndjson(
+            "H2",
+            "gemini_extractor.py:json_loads",
+            "JSONDecodeError",
+            {
+                "error": str(e),
+                "pos": pos,
+                "lineno": getattr(e, "lineno", None),
+                "colno": getattr(e, "colno", None),
+                "finish_reason": fr,
+                "raw_len": len(raw_stripped),
+                "snippet_around_pos": snip,
+                "suffix_400": raw_stripped[-400:] if raw_stripped else "",
+            },
+        )
+        # #endregion
+        raise
+    # #region agent log
+    _debug_session_ndjson(
+        "H5",
+        "gemini_extractor.py:json_loads",
+        "json_ok",
+        {
+            "txn_count": len((data or {}).get("transactions") or []),
+            "finish_reason": fr,
+        },
+    )
+    # #endregion
     data = _coerce_extraction_dict(data)
     return ExtractionResult.model_validate(data)
