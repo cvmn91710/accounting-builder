@@ -2,7 +2,7 @@
 
 **Purpose:** Standardized chart of accounts for Schedule C (Disbursements) across probate, trust administration, and conservatorship accountings. Built from analysis of five GOLGLLP accountings (14529 Evans, 22465 Ward, 8788 Green, 2223 Bartolotta x2).
 
-**Convention:** Parent category → Subcategory → (Payee/line item). Use the parent for sub-totals on the schedule. Group transactions by *expense type*, not by payee, except where a single payee dominates a category (e.g., a single facility under Residential Care).
+**Convention:** Parent category → Subcategory → (Payee/line item). Use the parent for subtotals on the schedule. Group transactions by *expense type*, not by payee, except where a single payee dominates a category (e.g., a single facility under Residential Care).
 
 **Matter-type applicability:** Each parent category is tagged with which matter type(s) it applies to:
 - **P** = Probate
@@ -110,10 +110,10 @@ For probate creditor claims allowed and paid. Itemize claimants individually.
 For conservatorships and ongoing trust support. Group by **type**, not payee.
 
 - Groceries (Walmart, Albertsons, Stater Bros, Vons, Ralphs, Costco, etc.)
-- Restaurants / Fast Food / Delivery (DoorDash, Grub Hub)
+- Restaurants / Fast Food / Delivery (DoorDash, Grubhub)
 - Personal Care / Pharmacy (CVS, Walgreens, Rite Aid)
 - Clothing / Apparel (Amazon clothing, Shein, retail)
-- Household Goods / Hardware (Home Depot, Ace, Lowes, Target)
+- Household Goods / Hardware (Home Depot, Ace, Lowe's, Target)
 - Communications & Entertainment (cable, streaming, events)
 - Dues & Subscriptions (Intuit, Microsoft, Dropbox, Lively)
 - Personal Allowance / Spending Money to Conservatee
@@ -165,7 +165,7 @@ Distinct from health insurance and homeowners (which live under their respective
 
 - DMV Registration / Renewal
 - Smog Check
-- Fuel (Chevron, Arco, Shell, Excaliber)
+- Fuel (Chevron, Arco, Shell, Excalibur)
 - Maintenance / Repairs
 - Car Wash / Detailing
 - Tow / Roadside
@@ -219,10 +219,10 @@ Itemize each fiduciary separately. Distinguish statutory from extraordinary.
 
 ## 14. Attorney's Fees  *(P, T, C)*
 
-- Attorney's Fees — Statutory (Probate Code §10810 et seq.)
-- Attorney's Fees — Extraordinary (Probate Code §10811)
-- Attorney's Fees — Trust Administration (per agreement)
-- Attorney's Fees — Litigation
+- Attorneys' Fees — Statutory (Probate Code §10810 et seq.)
+- Attorneys' Fees — Extraordinary (Probate Code §10811)
+- Attorneys' Fees — Trust Administration (per agreement)
+- Attorneys' Fees — Litigation
 - Filing Fees & Costs Advanced
 
 ---
@@ -271,7 +271,7 @@ Itemize each fiduciary separately. Distinguish statutory from extraordinary.
 
 ## 18. Storage & Moving  *(P, T, C)*
 
-- Storage Unit (Cubesmart, US Storage, Public Storage, Propay)
+- Storage Unit (CubeSmart, US Storage, Public Storage, ProPay)
 - Moving Services (U-Haul, professional movers)
 - Packing Materials
 - Vehicle Storage / Impound
