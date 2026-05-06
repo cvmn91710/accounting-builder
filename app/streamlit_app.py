@@ -749,8 +749,8 @@ def main() -> None:
         f"Matter: {sess.matter_type} | Accounting: {acct}"
     )
 
-    tab_upload, tab_extraction, tab_categorization, tab_finalize, tab_review, tab_export = st.tabs(
-        ["Upload", "Extraction", "Categorization", "Finalize", "Review", "Export"]
+    tab_upload, tab_extraction, tab_categorization, tab_finalize, tab_export = st.tabs(
+        ["Upload", "Extraction", "Categorization & Review", "Finalize", "Export"]
     )
 
     with tab_upload:
@@ -1038,7 +1038,7 @@ def main() -> None:
                 else:
                     st.caption(
                         "**Locked** — view only. Click **Unlock to edit** to change date, payee, "
-                        "clean description, or client clarification. Use **Review** after finalize for schedules and more columns."
+                        "clean description, or client clarification. After **Finalize**, use **Categorization & Review** for schedules and more columns."
                     )
                 if stmt_tx:
                     page_ext_ro = st.number_input(
@@ -1099,10 +1099,11 @@ def main() -> None:
                 st.error(f"Extraction error: {cur.extraction_status}")
 
     with tab_categorization:
-        st.subheader("Categorization (per statement)")
+        st.subheader("Categorization & review")
         st.caption(
-            "After **Extraction** is approved for a statement, run **AI categorization** and approve schedules. "
-            "Use **Review** for deeper edits after **Finalize** reconciliation is approved."
+            "After **Extraction** is approved, run **AI categorization** and confirm schedules (summary grid + PDF). "
+            "Use **Finalize** for session reconciliation; when reconciliation is approved, use **Line-by-line verification** "
+            "below on this tab for the full editable grid, then **Export**."
         )
         if not settings.gemini_api_key:
             st.warning("Set GEMINI_API_KEY in the environment to enable AI categorization.")
@@ -1124,6 +1125,14 @@ def main() -> None:
             stmt_tx_c = [t for t in txns if t.statement_id == pick_c]
             pdf_path_c = Path(cur_c.pdf_storage_path) if cur_c.pdf_storage_path else None
 
+            page_unified = st.number_input(
+                "PDF page",
+                min_value=1,
+                value=1,
+                step=1,
+                key=f"cat_review_pdf_page_{pick_c}",
+            )
+
             cat_disabled = (
                 not cur_c.extraction_human_approved
                 or cur_c.extraction_status != "extracted"
@@ -1141,19 +1150,14 @@ def main() -> None:
 
             if cur_c.categorization_ai_done and not cur_c.categorization_human_approved:
                 st.markdown("**Review categorization** — PDF and suggested schedules.")
-                page_cat = st.number_input(
-                    "PDF page",
-                    min_value=1,
-                    value=1,
-                    step=1,
-                    key=f"page_cat_{pick_c}",
-                )
                 _ncat = len(stmt_tx_c)
                 _cat_h = _split_pane_scroll_height(_ncat)
                 c_pdf2, c_rows2 = st.columns([0.38, 0.62])
                 with c_pdf2:
                     if pdf_path_c and pdf_path_c.exists():
-                        render_pdf_html(pdf_path_c, int(page_cat), height=_cat_h)
+                        render_pdf_html(
+                            pdf_path_c, int(page_unified), height=_cat_h
+                        )
                     else:
                         st.warning("PDF path missing.")
                 with c_rows2:
@@ -1176,7 +1180,7 @@ def main() -> None:
                         height=_cat_h,
                     )
                     st.checkbox(
-                        "Schedules look reasonable for this statement (use Review tab to edit cells).",
+                        "Schedules look reasonable for this statement (fine-tune categories in **Line-by-line verification** below).",
                         key=f"chk_cat_{pick_c}",
                     )
                     if st.button(
@@ -1194,11 +1198,158 @@ def main() -> None:
             elif not cur_c.extraction_human_approved:
                 st.info("Approve **Extraction** for this statement first.")
 
+            st.divider()
+            st.markdown("##### Line-by-line verification")
+            if sess.status in (ST_DRAFT, ST_PROCESSING, ST_RECONCILIATION_COMPLETE):
+                st.info(
+                    "Complete **Finalize** through reconciliation approval for session-wide checks. "
+                    "You can still edit schedules and fields below; **Export** stays gated until verification rules pass."
+                )
+            elif sess.status == ST_PENDING_REVIEW:
+                st.success(
+                    "Reconciliation is approved — verify each transaction (or mark excluded), then use **Export**."
+                )
+            rec_data_cat = []
+            if sess.reconciliation_json:
+                try:
+                    rec_data_cat = json.loads(sess.reconciliation_json)
+                except Exception:
+                    pass
+            if rec_data_cat:
+                with st.expander("Reconciliation summary", expanded=False):
+                    st.json(rec_data_cat)
+
+            filt_c = st.radio(
+                "Filter rows",
+                ["all", "high", "needs_review", "unverified"],
+                horizontal=True,
+                key=f"review_filt_{pick_c}",
+            )
+            right_tx = list(stmt_tx_c)
+            if filt_c == "high":
+                right_tx = [t for t in right_tx if (t.confidence or "") == "high"]
+            elif filt_c == "needs_review":
+                right_tx = [
+                    t
+                    for t in right_tx
+                    if (t.confidence or "") == "low"
+                    or (t.schedule or "") in ("needs_review", "?", "")
+                ]
+            elif filt_c == "unverified":
+                right_tx = [t for t in right_tx if not t.verified]
+
+            pdf_col, table_col = st.columns([0.38, 0.62])
+            with pdf_col:
+                st.markdown("**Source PDF**")
+                _rev_h = _split_pane_scroll_height(len(right_tx) if right_tx else 1)
+                if pdf_path_c and pdf_path_c.exists():
+                    render_pdf_html(pdf_path_c, int(page_unified), height=_rev_h)
+                elif pdf_path_c:
+                    st.warning("PDF file missing on disk.")
+            with table_col:
+                st.caption(
+                    "Table: **Date / Description / Payee / Amount** (read-only except Payee + Normalized), "
+                    "AI **Category** + **AI conf**, **Subcategory**, **Normalized**, **Notes**, **Verified**, **Excluded**. "
+                    "Edit cells, then **Save changes**."
+                )
+                if not right_tx:
+                    st.caption("No rows match this filter.")
+                else:
+                    sch_opts = list(SCHEDULE_UI_OPTIONS)
+                    editor_height = _split_pane_scroll_height(len(right_tx))
+                    edited = st.data_editor(
+                        _review_tx_table_rows(right_tx),
+                        key=f"review_editor_{pick_c}_{filt_c}",
+                        hide_index=True,
+                        num_rows="fixed",
+                        use_container_width=True,
+                        height=editor_height,
+                        column_config={
+                            "Date": st.column_config.TextColumn("Date", disabled=True, width="small"),
+                            "Description": st.column_config.TextColumn(
+                                "Description", disabled=True, width="large"
+                            ),
+                            "Payee": st.column_config.TextColumn("Payee", width="medium"),
+                            "Amount": st.column_config.NumberColumn(
+                                "Amount", disabled=True, format="$%.2f", width="small"
+                            ),
+                            "Pg": st.column_config.NumberColumn("Pg", disabled=True, width="small"),
+                            "Category": st.column_config.SelectboxColumn(
+                                "Category",
+                                options=sch_opts,
+                                required=True,
+                                width="small",
+                            ),
+                            "AI conf": st.column_config.TextColumn(
+                                "AI conf", disabled=True, width="small"
+                            ),
+                            "Subcategory": st.column_config.TextColumn(
+                                "Subcategory", width="medium"
+                            ),
+                            "Normalized": st.column_config.TextColumn(
+                                "Normalized", width="medium"
+                            ),
+                            "Notes": st.column_config.TextColumn("Notes", width="medium"),
+                            "Verified": st.column_config.CheckboxColumn("Verified", width="small"),
+                            "Excluded": st.column_config.CheckboxColumn("Excluded", width="small"),
+                        },
+                    )
+                    edited_rows = _data_editor_output_as_rows(edited)
+                    if st.button("Save changes", type="primary", key=f"save_review_tbl_{pick_c}"):
+                        if len(edited_rows) != len(right_tx):
+                            st.error("Row count mismatch — refresh and try again.")
+                        else:
+                            with session_scope() as db:
+                                for orig, erow in zip(right_tx, edited_rows):
+                                    row = db.get(TransactionORM, orig.id)
+                                    if not row:
+                                        continue
+                                    cat = erow.get("Category")
+                                    if isinstance(cat, str) and cat in sch_opts:
+                                        row.schedule = cat
+                                    row.subcategory = (
+                                        str(erow.get("Subcategory") or "").strip() or None
+                                    )
+                                    row.normalized_description = (
+                                        str(erow.get("Normalized") or "").strip() or None
+                                    )
+                                    row.payee_normalized = (
+                                        str(erow.get("Payee") or "").strip() or None
+                                    )
+                                    row.notes = (str(erow.get("Notes") or "").strip() or None)
+                                    row.excluded = bool(erow.get("Excluded"))
+                                    row.verified = bool(erow.get("Verified"))
+                                    if row.verified:
+                                        row.verified_by = user
+                                        row.verified_at = _utcnow()
+                                    else:
+                                        row.verified_by = None
+                                        row.verified_at = None
+                                    row.edited_by_staff = True
+                            st.success("Saved.")
+                            st.rerun()
+
+            stmt_tx_all = stmt_tx_c
+            if stmt_tx_all and st.button(
+                "Approve all high-confidence on this statement",
+                key=f"appr_hi_{pick_c}",
+            ):
+                with session_scope() as db:
+                    for t in stmt_tx_all:
+                        if (t.confidence or "") == "high":
+                            row = db.get(TransactionORM, t.id)
+                            if row:
+                                row.verified = True
+                                row.verified_by = user
+                                row.verified_at = _utcnow()
+                st.rerun()
+
     with tab_finalize:
         st.subheader("Finalize session — combine data and reconcile")
         st.caption(
             "When **every** statement has extraction + categorization approved, run **reconciliation** "
-            "to combine data across statements. Then approve reconciliation to unlock **Review** and **Export**."
+            "to combine data across statements. Then approve reconciliation to unlock line-by-line verification "
+            "on **Categorization & Review** and **Export**."
         )
         st.metric("Session stage", sess.status.replace("_", " ").title())
 
@@ -1257,7 +1408,7 @@ def main() -> None:
             else:
                 st.info("No reconciliation issues recorded.")
             st.checkbox(
-                "I have reviewed reconciliation results (and overrides in Review if needed).",
+                "I have reviewed reconciliation results (and overrides on **Categorization & Review** if needed).",
                 key=f"approve_rec_{sid}",
             )
             if st.button(
@@ -1272,7 +1423,9 @@ def main() -> None:
                 st.rerun()
 
         elif sess.status in (ST_PENDING_REVIEW, ST_COMPLETED):
-            st.success("Reconciliation approved ✓ — continue on the **Review** tab, then **Export**.")
+            st.success(
+                "Reconciliation approved ✓ — continue on **Categorization & Review** (line-by-line verification), then **Export**."
+            )
 
         if is_admin_user(user):
             with st.expander("Admin: skip review gates (dev only)"):
@@ -1298,177 +1451,6 @@ def main() -> None:
                                 t.payee_staff_accepted = True
                             if row.status not in (ST_DRAFT, ST_COMPLETED):
                                 row.status = ST_PENDING_REVIEW
-                    st.rerun()
-
-    # Review tab
-    with tab_review:
-        if sess.status in (ST_DRAFT, ST_PROCESSING, ST_RECONCILIATION_COMPLETE):
-            st.info(
-                "Use **Extraction** and **Categorization** for per-statement PDF review, then **Finalize** "
-                "for reconciliation. This tab is for deeper edits. Complete **Finalize** through reconciliation "
-                "approval before export."
-            )
-        elif sess.status == ST_PENDING_REVIEW:
-            st.success(
-                "Reconciliation is approved — verify each transaction (or mark excluded), then use **Export**."
-            )
-        rec_data = []
-        if sess.reconciliation_json:
-            try:
-                rec_data = json.loads(sess.reconciliation_json)
-            except Exception:
-                pass
-        if rec_data:
-            with st.expander("Reconciliation summary", expanded=False):
-                st.json(rec_data)
-
-        stmt_ids = [s.id for s in stmts]
-        if not stmt_ids:
-            st.info("Upload statements first.")
-        else:
-            head_a, head_b = st.columns([3, 2])
-            with head_a:
-                pick = st.selectbox(
-                    "Statement",
-                    stmt_ids,
-                    format_func=lambda i: next(
-                        (f"{s.institution or '—'} — {s.original_filename}" for s in stmts if s.id == i),
-                        i,
-                    ),
-                )
-            with head_b:
-                filt = st.radio(
-                    "Filter",
-                    ["all", "high", "needs_review", "unverified"],
-                    horizontal=True,
-                )
-            current = next(s for s in stmts if s.id == pick)
-            pdf_path = Path(current.pdf_storage_path) if current.pdf_storage_path else None
-
-            right_tx = [t for t in txns if t.statement_id == pick]
-            if filt == "high":
-                right_tx = [t for t in right_tx if (t.confidence or "") == "high"]
-            elif filt == "needs_review":
-                right_tx = [
-                    t
-                    for t in right_tx
-                    if (t.confidence or "") == "low"
-                    or (t.schedule or "") in ("needs_review", "?", "")
-                ]
-            elif filt == "unverified":
-                right_tx = [t for t in right_tx if not t.verified]
-
-            pdf_col, table_col = st.columns([0.38, 0.62])
-            with pdf_col:
-                st.markdown("**Source PDF**")
-                page_hint = st.number_input(
-                    "Page",
-                    min_value=1,
-                    value=1,
-                    step=1,
-                    key=f"review_pdf_page_{pick}",
-                )
-                _rev_h = _split_pane_scroll_height(len(right_tx) if right_tx else 1)
-                if pdf_path and pdf_path.exists():
-                    render_pdf_html(pdf_path, int(page_hint), height=_rev_h)
-                elif pdf_path:
-                    st.warning("PDF file missing on disk.")
-            with table_col:
-                st.caption(
-                    "Table: **Date / Description / Payee / Amount** (read-only except Payee + Normalized), "
-                    "AI **Category** + **AI conf**, **Subcategory**, **Normalized**, **Notes**, **Verified**, **Excluded**. "
-                    "Edit cells, then **Save changes**."
-                )
-                if not right_tx:
-                    st.caption("No rows match this filter.")
-                else:
-                    sch_opts = list(SCHEDULE_UI_OPTIONS)
-                    editor_height = _split_pane_scroll_height(len(right_tx))
-                    edited = st.data_editor(
-                        _review_tx_table_rows(right_tx),
-                        key=f"review_editor_{pick}_{filt}",
-                        hide_index=True,
-                        num_rows="fixed",
-                        use_container_width=True,
-                        height=editor_height,
-                        column_config={
-                            "Date": st.column_config.TextColumn("Date", disabled=True, width="small"),
-                            "Description": st.column_config.TextColumn(
-                                "Description", disabled=True, width="large"
-                            ),
-                            "Payee": st.column_config.TextColumn("Payee", width="medium"),
-                            "Amount": st.column_config.NumberColumn(
-                                "Amount", disabled=True, format="$%.2f", width="small"
-                            ),
-                            "Pg": st.column_config.NumberColumn("Pg", disabled=True, width="small"),
-                            "Category": st.column_config.SelectboxColumn(
-                                "Category",
-                                options=sch_opts,
-                                required=True,
-                                width="small",
-                            ),
-                            "AI conf": st.column_config.TextColumn(
-                                "AI conf", disabled=True, width="small"
-                            ),
-                            "Subcategory": st.column_config.TextColumn(
-                                "Subcategory", width="medium"
-                            ),
-                            "Normalized": st.column_config.TextColumn(
-                                "Normalized", width="medium"
-                            ),
-                            "Notes": st.column_config.TextColumn("Notes", width="medium"),
-                            "Verified": st.column_config.CheckboxColumn("Verified", width="small"),
-                            "Excluded": st.column_config.CheckboxColumn("Excluded", width="small"),
-                        },
-                    )
-                    edited_rows = _data_editor_output_as_rows(edited)
-                    if st.button("Save changes", type="primary", key=f"save_review_tbl_{pick}"):
-                        if len(edited_rows) != len(right_tx):
-                            st.error("Row count mismatch — refresh and try again.")
-                        else:
-                            with session_scope() as db:
-                                for orig, erow in zip(right_tx, edited_rows):
-                                    row = db.get(TransactionORM, orig.id)
-                                    if not row:
-                                        continue
-                                    cat = erow.get("Category")
-                                    if isinstance(cat, str) and cat in sch_opts:
-                                        row.schedule = cat
-                                    row.subcategory = (
-                                        str(erow.get("Subcategory") or "").strip() or None
-                                    )
-                                    row.normalized_description = (
-                                        str(erow.get("Normalized") or "").strip() or None
-                                    )
-                                    row.payee_normalized = (
-                                        str(erow.get("Payee") or "").strip() or None
-                                    )
-                                    row.notes = (str(erow.get("Notes") or "").strip() or None)
-                                    row.excluded = bool(erow.get("Excluded"))
-                                    row.verified = bool(erow.get("Verified"))
-                                    if row.verified:
-                                        row.verified_by = user
-                                        row.verified_at = _utcnow()
-                                    else:
-                                        row.verified_by = None
-                                        row.verified_at = None
-                                    row.edited_by_staff = True
-                            st.success("Saved.")
-                            st.rerun()
-
-                stmt_tx_all = [t for t in txns if t.statement_id == pick]
-                if stmt_tx_all and st.button(
-                    "Approve all high-confidence on this statement",
-                    key=f"appr_hi_{pick}",
-                ):
-                    with session_scope() as db:
-                        for t in stmt_tx_all:
-                            if (t.confidence or "") == "high":
-                                row = db.get(TransactionORM, t.id)
-                                if row:
-                                    row.verified = True
-                                    row.verified_by = user
-                                    row.verified_at = _utcnow()
                     st.rerun()
 
     with tab_export:
