@@ -142,7 +142,12 @@ def _inject_workbench_layout_css() -> None:
 
         .stButton > button,
         .stDownloadButton > button,
-        .stLinkButton > a {
+        .stLinkButton > a,
+        .stFileUploader button,
+        [data-testid="stBaseButton-secondary"],
+        [data-testid="stBaseButton-tertiary"],
+        [data-testid="stNumberInputStepUp"],
+        [data-testid="stNumberInputStepDown"] {
             background: var(--color-gold);
             color: #FFFFFF;
             border: 1px solid var(--color-gold);
@@ -154,7 +159,12 @@ def _inject_workbench_layout_css() -> None:
         }
         .stButton > button:hover,
         .stDownloadButton > button:hover,
-        .stLinkButton > a:hover {
+        .stLinkButton > a:hover,
+        .stFileUploader button:hover,
+        [data-testid="stBaseButton-secondary"]:hover,
+        [data-testid="stBaseButton-tertiary"]:hover,
+        [data-testid="stNumberInputStepUp"]:hover,
+        [data-testid="stNumberInputStepDown"]:hover {
             background: var(--color-gold-dark);
             border-color: var(--color-gold-dark);
             color: #FFFFFF;
@@ -730,7 +740,9 @@ def _client_clarification_export_rows(
     return out
 
 
-def render_pdf_html(pdf_path: Path, page: int = 1, *, height: int = 720) -> None:
+def render_pdf_html(
+    pdf_path: Path, page: int = 1, *, height: int = 720, key_suffix: str = ""
+) -> None:
     if not pdf_path.exists():
         # #region agent log
         agent_debug_log(
@@ -759,7 +771,7 @@ def render_pdf_html(pdf_path: Path, page: int = 1, *, height: int = 720) -> None
     # #endregion
     h = height
     key = "review_pdf_" + hashlib.sha256(
-        str(pdf_path.resolve()).encode("utf-8", errors="replace")
+        f"{pdf_path.resolve()}|{key_suffix}".encode("utf-8", errors="replace")
     ).hexdigest()[:20]
     try:
         st.pdf(pdf_path, height=h, key=key)
@@ -1049,17 +1061,31 @@ def main() -> None:
                     st.info(
                         f"{clar_n} row(s) marked for **client clarification** — listed on **Finalize** for export."
                     )
+                show_pdf_ext = st.toggle(
+                    "Show PDF",
+                    value=True,
+                    key=f"toggle_show_pdf_ext_{pick}",
+                )
                 page_ext = st.number_input(
                     "PDF page", min_value=1, value=1, step=1, key=f"page_ext_{pick}"
                 )
                 _nrows = len(stmt_tx)
                 _pane_h = _split_pane_scroll_height(_nrows)
-                c_pdf, c_rows = st.columns([0.38, 0.62])
-                with c_pdf:
-                    if pdf_path and pdf_path.exists():
-                        render_pdf_html(pdf_path, int(page_ext), height=_pane_h)
-                    else:
-                        st.warning("PDF path missing.")
+                if show_pdf_ext:
+                    c_pdf, c_rows = st.columns([0.38, 0.62])
+                else:
+                    c_pdf, c_rows = None, st.container()
+                if show_pdf_ext and c_pdf:
+                    with c_pdf:
+                        if pdf_path and pdf_path.exists():
+                            render_pdf_html(
+                                pdf_path,
+                                int(page_ext),
+                                height=_pane_h,
+                                key_suffix=f"ext_review_{pick}",
+                            )
+                        else:
+                            st.warning("PDF path missing.")
                 with c_rows:
                     st.caption(
                         "Edit **Payee (review)** and **Clean description**; check **Client clarification** as needed, "
@@ -1187,14 +1213,26 @@ def main() -> None:
                     )
                     _nrows_ro = len(stmt_tx)
                     _pane_ro = _split_pane_scroll_height(_nrows_ro)
-                    c_pdf_ro, c_rows_ro = st.columns([0.38, 0.62])
-                    with c_pdf_ro:
-                        if pdf_path and pdf_path.exists():
-                            render_pdf_html(
-                                pdf_path, int(page_ext_ro), height=_pane_ro
-                            )
-                        else:
-                            st.warning("PDF path missing.")
+                    show_pdf_ext_ro = st.toggle(
+                        "Show PDF",
+                        value=True,
+                        key=f"toggle_show_pdf_ext_ro_{pick}",
+                    )
+                    if show_pdf_ext_ro:
+                        c_pdf_ro, c_rows_ro = st.columns([0.38, 0.62])
+                    else:
+                        c_pdf_ro, c_rows_ro = None, st.container()
+                    if show_pdf_ext_ro and c_pdf_ro:
+                        with c_pdf_ro:
+                            if pdf_path and pdf_path.exists():
+                                render_pdf_html(
+                                    pdf_path,
+                                    int(page_ext_ro),
+                                    height=_pane_ro,
+                                    key_suffix=f"ext_approved_{pick}",
+                                )
+                            else:
+                                st.warning("PDF path missing.")
                     with c_rows_ro:
                         if _unlocked:
                             edited_apr = st.data_editor(
@@ -1269,6 +1307,11 @@ def main() -> None:
                 step=1,
                 key=f"cat_review_pdf_page_{pick_c}",
             )
+            show_pdf_cat = st.toggle(
+                "Show PDF",
+                value=True,
+                key=f"toggle_show_pdf_cat_{pick_c}",
+            )
 
             cat_disabled = (
                 not cur_c.extraction_human_approved
@@ -1289,14 +1332,21 @@ def main() -> None:
                 st.markdown("**Review categorization** — PDF and suggested schedules.")
                 _ncat = len(stmt_tx_c)
                 _cat_h = _split_pane_scroll_height(_ncat)
-                c_pdf2, c_rows2 = st.columns([0.38, 0.62])
-                with c_pdf2:
-                    if pdf_path_c and pdf_path_c.exists():
-                        render_pdf_html(
-                            pdf_path_c, int(page_unified), height=_cat_h
-                        )
-                    else:
-                        st.warning("PDF path missing.")
+                if show_pdf_cat:
+                    c_pdf2, c_rows2 = st.columns([0.38, 0.62])
+                else:
+                    c_pdf2, c_rows2 = None, st.container()
+                if show_pdf_cat and c_pdf2:
+                    with c_pdf2:
+                        if pdf_path_c and pdf_path_c.exists():
+                            render_pdf_html(
+                                pdf_path_c,
+                                int(page_unified),
+                                height=_cat_h,
+                                key_suffix=f"cat_summary_{pick_c}",
+                            )
+                        else:
+                            st.warning("PDF path missing.")
                 with c_rows2:
                     st.dataframe(
                         [
@@ -1375,14 +1425,23 @@ def main() -> None:
             elif filt_c == "unverified":
                 right_tx = [t for t in right_tx if not t.verified]
 
-            pdf_col, table_col = st.columns([0.38, 0.62])
-            with pdf_col:
-                st.markdown("**Source PDF**")
-                _rev_h = _split_pane_scroll_height(len(right_tx) if right_tx else 1)
-                if pdf_path_c and pdf_path_c.exists():
-                    render_pdf_html(pdf_path_c, int(page_unified), height=_rev_h)
-                elif pdf_path_c:
-                    st.warning("PDF file missing on disk.")
+            _rev_h = _split_pane_scroll_height(len(right_tx) if right_tx else 1)
+            if show_pdf_cat:
+                pdf_col, table_col = st.columns([0.38, 0.62])
+            else:
+                pdf_col, table_col = None, st.container()
+            if show_pdf_cat and pdf_col:
+                with pdf_col:
+                    st.markdown("**Source PDF**")
+                    if pdf_path_c and pdf_path_c.exists():
+                        render_pdf_html(
+                            pdf_path_c,
+                            int(page_unified),
+                            height=_rev_h,
+                            key_suffix=f"cat_line_by_line_{pick_c}_{filt_c}",
+                        )
+                    elif pdf_path_c:
+                        st.warning("PDF file missing on disk.")
             with table_col:
                 st.caption(
                     "Table: **Date / Description / Payee / Amount** (read-only except Payee + Normalized), "
