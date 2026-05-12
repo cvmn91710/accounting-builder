@@ -74,6 +74,25 @@ def _schedule_c_taxonomy_prompt_block() -> str:
     )
 
 
+BROKERAGE_RULES_BLOCK = """Brokerage-specific rules (apply ONLY to transactions where tradeKind is one of buy/sell/dividend/interest/cap_gain_dist/fee):
+- tradeKind == "dividend" or "interest" or "cap_gain_dist": schedule = "A".
+  - subcategory: "Interest" for interest income; "Miscellaneous Receipts" for dividends and capital-gain distributions (firm convention — they do not have a dedicated Schedule A subsection).
+- tradeKind == "sell":
+  - The cash proceeds row goes to schedule = "A" with subcategory = "Miscellaneous Receipts" (principal proceeds).
+  - If the row reports a realized loss (realizedGainLoss < 0): schedule = "D" with subcategory = "Realized Losses" (ad-hoc Schedule D — Losses on Sales).
+  - If the row reports a realized gain (realizedGainLoss > 0): schedule = "K" with subcategory = "Realized Gains" (ad-hoc Schedule K — Change in Assets, since the firm template has no dedicated Gains sheet).
+  - If a single transaction row contains BOTH proceeds and a gain/loss, prefer the proceeds → Schedule A; flag for staff review so they can also record the realized gain/loss as a follow-up row.
+- tradeKind == "buy":
+  - schedule = "internal_transfer". Reason: a buy is a swap of cash for securities inside the same matter account; no income, no expense. The row stays on Brokerage Transactions / audit trail and is excluded from schedule totals.
+- tradeKind == "fee":
+  - schedule = "C" with subcategory = "Miscellaneous" (brokerage fees / commissions / wire fees).
+- tradeKind in {"transfer_in", "transfer_out"}:
+  - If the counterparty is another account held in the matter's name → "internal_transfer".
+  - If the counterparty is a non-matter party → schedule = "G" (Distributions) and flag for staff to confirm.
+- tradeKind == "cash" or "other": apply normal (non-brokerage) rules below.
+"""
+
+
 def build_categorization_prompt(
     matter_type: str,
     transactions: list[dict[str, Any]],
@@ -81,6 +100,12 @@ def build_categorization_prompt(
     mt_key = _resolve_matter_key(matter_type)
     mt = matter_type.replace("_", " ")
     schedule_c_taxonomy = _schedule_c_taxonomy_prompt_block()
+    brokerage_kinds = {"buy", "sell", "dividend", "interest", "cap_gain_dist", "fee"}
+    has_brokerage = any(
+        (t.get("trade_kind") or t.get("tradeKind") or "") in brokerage_kinds
+        for t in transactions
+    )
+    brokerage_block = BROKERAGE_RULES_BLOCK if has_brokerage else ""
     return f"""You are a California probate accounting specialist.
 
 Matter type: {mt}
@@ -91,8 +116,9 @@ Schedule definitions:
 
 {schedule_c_taxonomy}
 
+{brokerage_block}
 Tasks:
-- Each transaction may include **payee** (counterparty) when provided — use it with **description** for classification.
+- Each transaction may include **payee** (counterparty) and **tradeKind** (for brokerage rows) — use them with **description** for classification.
 - Assign each transaction to exactly one schedule letter from the firm's template scheme, OR use special values:
   - Standard sheets (always in master workbook): {", ".join(sorted(STANDARD_SCHEDULE_LETTERS))}.
   - Ad-hoc sheets (only when facts warrant — prefer standard schedules when they fit): {", ".join(sorted(AD_HOC_SCHEDULE_LETTERS))}.

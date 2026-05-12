@@ -70,6 +70,8 @@ class StatementORM(Base):
     account_last4: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
     statement_period_start: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     statement_period_end: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # beginning_balance / ending_balance hold the CASH balance on the statement.
+    # For brokerage statements, holdings live in the separate positions table.
     beginning_balance: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     ending_balance: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     extraction_status: Mapped[str] = mapped_column(String(32), default="pending_extraction")
@@ -79,9 +81,15 @@ class StatementORM(Base):
     extraction_human_approved: Mapped[bool] = mapped_column(Boolean, default=False)
     categorization_ai_done: Mapped[bool] = mapped_column(Boolean, default=False)
     categorization_human_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    document_type: Mapped[str] = mapped_column(String(32), default="unknown")
+    document_type_confidence: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    document_type_staff_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     session: Mapped["AccountingSessionORM"] = relationship(back_populates="statements")
     transactions: Mapped[list["TransactionORM"]] = relationship(
+        back_populates="statement", cascade="all, delete-orphan"
+    )
+    positions: Mapped[list["PositionORM"]] = relationship(
         back_populates="statement", cascade="all, delete-orphan"
     )
 
@@ -104,6 +112,9 @@ class TransactionORM(Base):
     quantity: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
     price: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
     cost_basis: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    trade_kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    proceeds: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    realized_gain_loss: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
 
     schedule: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     subcategory: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
@@ -127,6 +138,31 @@ class TransactionORM(Base):
     client_clarification: Mapped[bool] = mapped_column(Boolean, default=False)
 
     statement: Mapped["StatementORM"] = relationship(back_populates="transactions")
+
+
+class PositionORM(Base):
+    """Holdings snapshot row: one security at period start or end (brokerage statements)."""
+
+    __tablename__ = "positions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    statement_id: Mapped[str] = mapped_column(String(36), ForeignKey("statements.id"))
+    as_of: Mapped[str] = mapped_column(String(16))  # 'beginning' | 'ending'
+    asset_class: Mapped[str] = mapped_column(String(16), default="non_cash")  # 'cash' | 'non_cash'
+    security_symbol: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    security_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    quantity: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    unit_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    market_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    cost_basis: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    source_page: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    staff_accepted: Mapped[bool] = mapped_column(Boolean, default=False)
+    client_clarification: Mapped[bool] = mapped_column(Boolean, default=False)
+    edited_by_staff: Mapped[bool] = mapped_column(Boolean, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    statement: Mapped["StatementORM"] = relationship(back_populates="positions")
 
 
 _engine = None
@@ -206,9 +242,28 @@ def _migrate_sqlite_schema(engine) -> None:
             sadds.append("categorization_ai_done BOOLEAN DEFAULT 0")
         if "categorization_human_approved" not in scols:
             sadds.append("categorization_human_approved BOOLEAN DEFAULT 0")
+        if "document_type" not in scols:
+            sadds.append("document_type VARCHAR(32) DEFAULT 'unknown'")
+        if "document_type_confidence" not in scols:
+            sadds.append("document_type_confidence VARCHAR(16)")
+        if "document_type_staff_accepted" not in scols:
+            sadds.append("document_type_staff_accepted BOOLEAN DEFAULT 0")
         for ddl in sadds:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE statements ADD COLUMN {ddl}"))
+    insp = inspect(engine)
+    if insp.has_table("transactions"):
+        tcols = {c["name"] for c in inspect(engine).get_columns("transactions")}
+        trade_adds = []
+        if "trade_kind" not in tcols:
+            trade_adds.append("trade_kind VARCHAR(32)")
+        if "proceeds" not in tcols:
+            trade_adds.append("proceeds NUMERIC(18, 2)")
+        if "realized_gain_loss" not in tcols:
+            trade_adds.append("realized_gain_loss NUMERIC(18, 2)")
+        for ddl in trade_adds:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE transactions ADD COLUMN {ddl}"))
 
 
 @contextmanager

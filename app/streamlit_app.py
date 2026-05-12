@@ -29,6 +29,7 @@ from app.auth_entra import get_auth_url, handle_oauth_callback, require_user
 from app.config import get_settings
 from app.db import (
     AccountingSessionORM,
+    PositionORM,
     StatementORM,
     TransactionORM,
     new_id,
@@ -37,12 +38,32 @@ from app.db import (
 from app.excel_writer import generate_accounting_workbook
 from app.gemini_categorizer import categorize_with_gemini
 from app.gemini_description_cleanup import cleanup_descriptions_with_gemini
-from app.gemini_extractor import extract_statement_with_gemini
-from app.models import ExtractionResult
+from app.gemini_extractor import detect_document_type, extract_statement_with_gemini
+from app.models import DocumentType, ExtractionResult
 from app.pdf_ingest import PdfValidationError, save_uploaded_pdf, validate_pdf
 from app.reconciler import apply_internal_transfer_flags, issues_to_json, run_reconciliation
-from app.schedules import SCHEDULE_UI_OPTIONS
+from app.schedules import SCHEDULE_UI_OPTIONS, schedule_ui_options_for
 from app.text_extract import extract_pdf
+
+
+_DOCUMENT_TYPE_LABELS: dict[str, str] = {
+    "bank": "Bank",
+    "brokerage": "Brokerage",
+    "credit_card": "Credit Card",
+    "retirement": "Retirement",
+    "unknown": "Unknown",
+}
+_DOCUMENT_TYPE_OPTIONS: tuple[str, ...] = (
+    "bank",
+    "brokerage",
+    "credit_card",
+    "retirement",
+    "unknown",
+)
+
+
+def _document_type_label(dt: Optional[str]) -> str:
+    return _DOCUMENT_TYPE_LABELS.get((dt or "").lower(), "Unknown")
 
 
 st.set_page_config(
@@ -412,10 +433,21 @@ def run_extraction_for_statement(session_id: str, statement_id: str) -> None:
             return
         try:
             doc = extract_pdf(Path(stt.pdf_storage_path))
+            detection = detect_document_type(doc.combined_text)
+            detected_type = detection.document_type or DocumentType.unknown
+            stt.document_type = detected_type.value
+            stt.document_type_confidence = detection.confidence
+            stt.document_type_staff_accepted = False
             result: ExtractionResult = extract_statement_with_gemini(
-                doc.combined_text, doc.tables_summary
+                doc.combined_text,
+                doc.tables_summary,
+                document_type=detected_type,
             )
-            stt.institution = result.institution
+            # Allow the main extraction call to overwrite the detection (e.g. when the
+            # quick classifier said "unknown" but the full extract is confident).
+            if result.document_type and result.document_type != DocumentType.unknown:
+                stt.document_type = result.document_type.value
+            stt.institution = result.institution or (detection.institution or stt.institution)
             stt.account_type = result.account_type
             stt.account_last4 = result.account_number_last4
             stt.statement_period_start = result.statement_period_start
@@ -427,6 +459,7 @@ def run_extraction_for_statement(session_id: str, statement_id: str) -> None:
                 stt.extraction_flags_json = json.dumps(result.flags)
 
             db.query(TransactionORM).filter_by(statement_id=stt.id).delete()
+            db.query(PositionORM).filter_by(statement_id=stt.id).delete()
             new_rows: list[TransactionORM] = []
             for ex in result.transactions:
                 ta = ex.model_dump()
@@ -445,9 +478,34 @@ def run_extraction_for_statement(session_id: str, statement_id: str) -> None:
                     quantity=ta.get("quantity"),
                     price=ta.get("price"),
                     cost_basis=ta.get("cost_basis"),
+                    trade_kind=ta.get("trade_kind"),
+                    proceeds=ta.get("proceeds"),
+                    realized_gain_loss=ta.get("realized_gain_loss"),
                 )
                 db.add(row)
                 new_rows.append(row)
+            for as_of_key, items in (
+                ("beginning", result.beginning_holdings),
+                ("ending", result.ending_holdings),
+            ):
+                for sort_idx, pos in enumerate(items):
+                    pa = pos.model_dump()
+                    db.add(
+                        PositionORM(
+                            id=new_id(),
+                            statement_id=stt.id,
+                            as_of=as_of_key,
+                            asset_class=(pa.get("asset_class") or "non_cash"),
+                            security_symbol=pa.get("security_symbol"),
+                            security_description=pa.get("security_description"),
+                            quantity=pa.get("quantity"),
+                            unit_price=pa.get("unit_price"),
+                            market_value=pa.get("market_value"),
+                            cost_basis=pa.get("cost_basis"),
+                            source_page=pa.get("source_page"),
+                            sort_order=sort_idx,
+                        )
+                    )
             if new_rows and settings.gemini_api_key:
                 try:
                     _apply_description_cleanup_to_rows(stt, new_rows)
@@ -540,9 +598,16 @@ def run_reconciliation_stage(session_id: str) -> None:
             .filter(StatementORM.session_id == session_id)
             .all()
         )
+        positions = (
+            db.query(PositionORM)
+            .join(StatementORM)
+            .filter(StatementORM.session_id == session_id)
+            .all()
+        )
         sdicts = [_statement_to_dict(s) for s in stmts]
         tdicts = [_transaction_to_dict(t) for t in txns]
-        issues = run_reconciliation(sdicts, tdicts)
+        pdicts = [_position_to_dict(p) for p in positions]
+        issues = run_reconciliation(sdicts, tdicts, positions=pdicts)
         apply_internal_transfer_flags(tdicts, issues)
         for t in txns:
             d = next((x for x in tdicts if x["id"] == t.id), None)
@@ -585,6 +650,13 @@ def _transaction_to_dict(t: TransactionORM) -> dict[str, Any]:
         "description_cleanup_reasoning": t.description_cleanup_reasoning,
         "description_staff_accepted": t.description_staff_accepted,
         "client_clarification": t.client_clarification,
+        "security_symbol": t.security_symbol,
+        "quantity": t.quantity,
+        "price": t.price,
+        "cost_basis": t.cost_basis,
+        "trade_kind": t.trade_kind,
+        "proceeds": t.proceeds,
+        "realized_gain_loss": t.realized_gain_loss,
     }
 
 
@@ -601,10 +673,35 @@ def _statement_to_dict(s: StatementORM) -> dict[str, Any]:
         "ending_balance": s.ending_balance,
         "extraction_status": s.extraction_status,
         "pdf_storage_path": s.pdf_storage_path,
+        "document_type": getattr(s, "document_type", None) or "unknown",
+        "document_type_confidence": getattr(s, "document_type_confidence", None),
     }
 
 
-def load_full_session(sid: str) -> tuple[AccountingSessionORM, list[StatementORM], list[TransactionORM]]:
+def _position_to_dict(p: PositionORM) -> dict[str, Any]:
+    return {
+        "id": p.id,
+        "statement_id": p.statement_id,
+        "as_of": p.as_of,
+        "asset_class": p.asset_class,
+        "security_symbol": p.security_symbol,
+        "security_description": p.security_description,
+        "quantity": p.quantity,
+        "unit_price": p.unit_price,
+        "market_value": p.market_value,
+        "cost_basis": p.cost_basis,
+        "source_page": p.source_page,
+        "notes": p.notes,
+        "staff_accepted": p.staff_accepted,
+        "client_clarification": p.client_clarification,
+        "edited_by_staff": p.edited_by_staff,
+        "sort_order": p.sort_order,
+    }
+
+
+def load_full_session(
+    sid: str,
+) -> tuple[AccountingSessionORM, list[StatementORM], list[TransactionORM], list[PositionORM]]:
     with session_scope() as db:
         sess = db.get(AccountingSessionORM, sid)
         if not sess:
@@ -616,7 +713,8 @@ def load_full_session(sid: str) -> tuple[AccountingSessionORM, list[StatementORM
             .all()
         )
         txn_ids = [s.id for s in stmts]
-        txns = []
+        txns: list[TransactionORM] = []
+        positions: list[PositionORM] = []
         if txn_ids:
             txns = (
                 db.query(TransactionORM)
@@ -624,7 +722,13 @@ def load_full_session(sid: str) -> tuple[AccountingSessionORM, list[StatementORM
                 .order_by(TransactionORM.txn_date, TransactionORM.id)
                 .all()
             )
-        return sess, stmts, txns
+            positions = (
+                db.query(PositionORM)
+                .filter(PositionORM.statement_id.in_(txn_ids))
+                .order_by(PositionORM.statement_id, PositionORM.as_of, PositionORM.sort_order)
+                .all()
+            )
+        return sess, stmts, txns, positions
 
 
 def ensure_session_in_state() -> None:
@@ -712,6 +816,91 @@ def _persist_extraction_review_edits(
             row.payee_normalized = payee_rev or None
             row.payee_staff_accepted = not clar
     return None
+
+
+def _holdings_table_rows(positions: list[PositionORM]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for p in positions:
+        rows.append(
+            {
+                "Symbol": p.security_symbol or "",
+                "Description": (p.security_description or "")[:200],
+                "Asset class": p.asset_class or "non_cash",
+                "Quantity": float(p.quantity) if p.quantity is not None else None,
+                "Unit price": float(p.unit_price) if p.unit_price is not None else None,
+                "Market value": float(p.market_value) if p.market_value is not None else None,
+                "Cost basis": float(p.cost_basis) if p.cost_basis is not None else None,
+                "Pg": int(p.source_page) if p.source_page is not None else None,
+                "Notes": p.notes or "",
+                "Client clarification": bool(p.client_clarification),
+            }
+        )
+    return rows
+
+
+def _holdings_column_config() -> dict[str, Any]:
+    return {
+        "Symbol": st.column_config.TextColumn("Symbol", width="small"),
+        "Description": st.column_config.TextColumn("Description", width="large"),
+        "Asset class": st.column_config.SelectboxColumn(
+            "Class", options=["cash", "non_cash"], required=True, width="small"
+        ),
+        "Quantity": st.column_config.NumberColumn("Qty", format="%.4f", width="small"),
+        "Unit price": st.column_config.NumberColumn("Unit price", format="$%.4f", width="small"),
+        "Market value": st.column_config.NumberColumn("Market value", format="$%.2f", width="small"),
+        "Cost basis": st.column_config.NumberColumn("Cost basis", format="$%.2f", width="small"),
+        "Pg": st.column_config.NumberColumn("Pg", disabled=True, width="small"),
+        "Notes": st.column_config.TextColumn("Notes", width="medium"),
+        "Client clarification": st.column_config.CheckboxColumn("Client?", width="small"),
+    }
+
+
+def _persist_holdings_edits(
+    positions: list[PositionORM],
+    edited_rows: list[dict[str, Any]],
+) -> Optional[str]:
+    if len(edited_rows) != len(positions):
+        return "Row count mismatch — refresh and try again."
+    with session_scope() as db:
+        for orig, erow in zip(positions, edited_rows):
+            row = db.get(PositionORM, orig.id)
+            if not row:
+                continue
+            row.security_symbol = (str(erow.get("Symbol") or "").strip() or None)
+            row.security_description = (str(erow.get("Description") or "").strip() or None)
+            ac = str(erow.get("Asset class") or "").strip().lower()
+            row.asset_class = ac if ac in ("cash", "non_cash") else "non_cash"
+            for src, attr in (
+                ("Quantity", "quantity"),
+                ("Unit price", "unit_price"),
+                ("Market value", "market_value"),
+                ("Cost basis", "cost_basis"),
+            ):
+                v = erow.get(src)
+                if v in ("", None):
+                    setattr(row, attr, None)
+                else:
+                    try:
+                        setattr(row, attr, Decimal(str(v)))
+                    except Exception:
+                        return f"Invalid number in {src}: {v!r}"
+            row.notes = (str(erow.get("Notes") or "").strip() or None)
+            row.client_clarification = bool(erow.get("Client clarification"))
+            row.staff_accepted = not row.client_clarification
+            row.edited_by_staff = True
+    return None
+
+
+def _holdings_resolved(positions: list[PositionORM]) -> bool:
+    if not positions:
+        return True
+    for p in positions:
+        if p.client_clarification:
+            continue
+        if p.staff_accepted:
+            continue
+        return False
+    return True
 
 
 def _client_clarification_export_rows(
@@ -884,13 +1073,13 @@ def main() -> None:
         return
 
     try:
-        sess, stmts, txns = load_full_session(sid)
+        sess, stmts, txns, positions = load_full_session(sid)
     except ValueError:
         st.error("Session not found.")
         return
 
     migrate_workflow_status(sid)
-    sess, stmts, txns = load_full_session(sid)
+    sess, stmts, txns, positions = load_full_session(sid)
 
     acct = getattr(sess, "accounting_type", None) or "—"
     st.caption(
@@ -946,12 +1135,13 @@ def main() -> None:
                 if ok:
                     st.success("Upload complete.")
                     # Same script run: `stmts` was loaded before this commit; reload so other tabs see PDFs.
-                    sess, stmts, txns = load_full_session(sid)
+                    sess, stmts, txns, positions = load_full_session(sid)
         if stmts:
             st.dataframe(
                 [
                     {
                         "File": s.original_filename,
+                        "Type": _document_type_label(getattr(s, "document_type", None)),
                         "Institution": s.institution,
                         "Account": s.account_last4,
                         "Status": s.extraction_status,
@@ -986,6 +1176,7 @@ def main() -> None:
                 overview.append(
                     {
                         "File": s.original_filename,
+                        "Type": _document_type_label(getattr(s, "document_type", None)),
                         "AI extract": s.extraction_status,
                         "Extract ✓": "Yes" if s.extraction_human_approved else "—",
                         "Cat AI": "Yes" if s.categorization_ai_done else "—",
@@ -1007,7 +1198,36 @@ def main() -> None:
             )
             cur = next(s for s in stmts if s.id == pick)
             stmt_tx = [t for t in txns if t.statement_id == pick]
+            stmt_positions = [p for p in positions if p.statement_id == pick]
+            beg_positions = [p for p in stmt_positions if p.as_of == "beginning"]
+            end_positions = [p for p in stmt_positions if p.as_of == "ending"]
             pdf_path = Path(cur.pdf_storage_path) if cur.pdf_storage_path else None
+            is_brokerage = (getattr(cur, "document_type", None) or "").lower() == "brokerage"
+
+            col_dt1, col_dt2 = st.columns([0.55, 0.45])
+            with col_dt1:
+                current_dt = (getattr(cur, "document_type", None) or "unknown").lower()
+                if current_dt not in _DOCUMENT_TYPE_OPTIONS:
+                    current_dt = "unknown"
+                dt_label_prefix = "Detected"
+                if cur.document_type_staff_accepted:
+                    dt_label_prefix = "Confirmed"
+                new_dt = st.selectbox(
+                    f"{dt_label_prefix} document type "
+                    f"({(cur.document_type_confidence or 'no confidence').lower()})",
+                    options=list(_DOCUMENT_TYPE_OPTIONS),
+                    format_func=_document_type_label,
+                    index=_DOCUMENT_TYPE_OPTIONS.index(current_dt),
+                    key=f"doc_type_pick_{pick}",
+                )
+            with col_dt2:
+                if st.button("Confirm type", key=f"confirm_doc_type_{pick}"):
+                    with session_scope() as db:
+                        row_s = db.get(StatementORM, pick)
+                        if row_s:
+                            row_s.document_type = new_dt
+                            row_s.document_type_staff_accepted = True
+                    st.rerun()
 
             if st.button(
                 "Run AI extraction for this statement",
@@ -1153,19 +1373,76 @@ def main() -> None:
                     else:
                         st.caption("No transaction rows.")
                     st.caption(f"{len(stmt_tx)} row(s) — compare to the statement PDF.")
+
+                    if is_brokerage or beg_positions or end_positions:
+                        st.markdown("##### Holdings (period start)")
+                        if beg_positions:
+                            edited_beg = st.data_editor(
+                                _holdings_table_rows(beg_positions),
+                                key=f"beg_holdings_editor_{pick}",
+                                hide_index=True,
+                                num_rows="fixed",
+                                use_container_width=True,
+                                column_config=_holdings_column_config(),
+                            )
+                            beg_rows = _data_editor_output_as_rows(edited_beg)
+                            if st.button(
+                                "Save beginning holdings",
+                                key=f"save_beg_holdings_{pick}",
+                            ):
+                                err = _persist_holdings_edits(beg_positions, beg_rows)
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.success("Saved.")
+                                    st.rerun()
+                        else:
+                            st.caption("No beginning holdings extracted.")
+                        st.markdown("##### Holdings (period end)")
+                        if end_positions:
+                            edited_end = st.data_editor(
+                                _holdings_table_rows(end_positions),
+                                key=f"end_holdings_editor_{pick}",
+                                hide_index=True,
+                                num_rows="fixed",
+                                use_container_width=True,
+                                column_config=_holdings_column_config(),
+                            )
+                            end_rows = _data_editor_output_as_rows(edited_end)
+                            if st.button(
+                                "Save ending holdings",
+                                key=f"save_end_holdings_{pick}",
+                            ):
+                                err = _persist_holdings_edits(end_positions, end_rows)
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.success("Saved.")
+                                    st.rerun()
+                        else:
+                            st.caption("No ending holdings extracted.")
+
                     st.checkbox(
                         "Extracted rows match the PDF for this statement.",
                         key=f"chk_ext_{pick}",
                     )
                     review_gate = _statement_extraction_review_resolved(stmt_tx)
+                    holdings_gate = _holdings_resolved(stmt_positions)
                     if not review_gate and stmt_tx:
                         st.caption(
                             "Approve is disabled until every row passes **description** and **payee** review rules."
                         )
+                    if is_brokerage and not holdings_gate:
+                        st.caption(
+                            "Approve is disabled until each holding is reviewed (save to mark as accepted, "
+                            "or check **Client clarification**)."
+                        )
                     if st.button(
                         "Approve extraction for this statement",
                         disabled=not (
-                            st.session_state.get(f"chk_ext_{pick}", False) and review_gate
+                            st.session_state.get(f"chk_ext_{pick}", False)
+                            and review_gate
+                            and (not is_brokerage or holdings_gate)
                         ),
                         key=f"btn_ap_ext_{pick}",
                     ):
@@ -1451,44 +1728,78 @@ def main() -> None:
                 if not right_tx:
                     st.caption("No rows match this filter.")
                 else:
-                    sch_opts = list(SCHEDULE_UI_OPTIONS)
+                    is_brokerage_cat = (
+                        (getattr(cur_c, "document_type", None) or "").lower() == "brokerage"
+                    )
+                    sch_opts = list(
+                        schedule_ui_options_for(getattr(cur_c, "document_type", None))
+                    )
                     editor_height = _split_pane_scroll_height(len(right_tx))
+                    column_config = {
+                        "Date": st.column_config.TextColumn("Date", disabled=True, width="small"),
+                        "Description": st.column_config.TextColumn(
+                            "Description", disabled=True, width="large"
+                        ),
+                        "Payee": st.column_config.TextColumn("Payee", width="medium"),
+                        "Amount": st.column_config.NumberColumn(
+                            "Amount", disabled=True, format="$%.2f", width="small"
+                        ),
+                        "Pg": st.column_config.NumberColumn("Pg", disabled=True, width="small"),
+                        "Category": st.column_config.SelectboxColumn(
+                            "Category",
+                            options=sch_opts,
+                            required=True,
+                            width="small",
+                        ),
+                        "AI conf": st.column_config.TextColumn(
+                            "AI conf", disabled=True, width="small"
+                        ),
+                        "Subcategory": st.column_config.TextColumn(
+                            "Subcategory", width="medium"
+                        ),
+                        "Normalized": st.column_config.TextColumn(
+                            "Normalized", width="medium"
+                        ),
+                        "Notes": st.column_config.TextColumn("Notes", width="medium"),
+                        "Verified": st.column_config.CheckboxColumn("Verified", width="small"),
+                        "Excluded": st.column_config.CheckboxColumn("Excluded", width="small"),
+                    }
+                    if is_brokerage_cat:
+                        column_config.update(
+                            {
+                                "Activity": st.column_config.TextColumn(
+                                    "Activity", disabled=True, width="small"
+                                ),
+                                "Symbol": st.column_config.TextColumn(
+                                    "Symbol", disabled=True, width="small"
+                                ),
+                                "Qty": st.column_config.NumberColumn(
+                                    "Qty", disabled=True, format="%.4f", width="small"
+                                ),
+                                "Price": st.column_config.NumberColumn(
+                                    "Price", disabled=True, format="$%.4f", width="small"
+                                ),
+                                "Cost basis": st.column_config.NumberColumn(
+                                    "Cost basis", disabled=True, format="$%.2f", width="small"
+                                ),
+                                "Proceeds": st.column_config.NumberColumn(
+                                    "Proceeds", disabled=True, format="$%.2f", width="small"
+                                ),
+                                "Realized G/L": st.column_config.NumberColumn(
+                                    "Realized G/L", disabled=True, format="$%.2f", width="small"
+                                ),
+                            }
+                        )
                     edited = st.data_editor(
-                        _review_tx_table_rows(right_tx),
+                        _review_tx_table_rows(
+                            right_tx, include_brokerage_cols=is_brokerage_cat
+                        ),
                         key=f"review_editor_{pick_c}_{filt_c}",
                         hide_index=True,
                         num_rows="fixed",
                         use_container_width=True,
                         height=editor_height,
-                        column_config={
-                            "Date": st.column_config.TextColumn("Date", disabled=True, width="small"),
-                            "Description": st.column_config.TextColumn(
-                                "Description", disabled=True, width="large"
-                            ),
-                            "Payee": st.column_config.TextColumn("Payee", width="medium"),
-                            "Amount": st.column_config.NumberColumn(
-                                "Amount", disabled=True, format="$%.2f", width="small"
-                            ),
-                            "Pg": st.column_config.NumberColumn("Pg", disabled=True, width="small"),
-                            "Category": st.column_config.SelectboxColumn(
-                                "Category",
-                                options=sch_opts,
-                                required=True,
-                                width="small",
-                            ),
-                            "AI conf": st.column_config.TextColumn(
-                                "AI conf", disabled=True, width="small"
-                            ),
-                            "Subcategory": st.column_config.TextColumn(
-                                "Subcategory", width="medium"
-                            ),
-                            "Normalized": st.column_config.TextColumn(
-                                "Normalized", width="medium"
-                            ),
-                            "Notes": st.column_config.TextColumn("Notes", width="medium"),
-                            "Verified": st.column_config.CheckboxColumn("Verified", width="small"),
-                            "Excluded": st.column_config.CheckboxColumn("Excluded", width="small"),
-                        },
+                        column_config=column_config,
                     )
                     edited_rows = _data_editor_output_as_rows(edited)
                     if st.button("Save changes", type="primary", key=f"save_review_tbl_{pick_c}"):
@@ -1666,8 +1977,15 @@ def main() -> None:
                     .all()
                 )
                 full_st = db.query(StatementORM).filter_by(session_id=sid).all()
+                full_pos = (
+                    db.query(PositionORM)
+                    .join(StatementORM)
+                    .filter(StatementORM.session_id == sid)
+                    .all()
+                )
             tdicts = [_transaction_to_dict(t) for t in full_tx]
             sdict = {s.id: _statement_to_dict(s) for s in full_st}
+            pdicts = [_position_to_dict(p) for p in full_pos]
             stmt_order = [s.id for s in sorted(stmts, key=lambda x: (x.sort_order, x.id))]
             session_meta = {
                 "case_number": getattr(sess, "case_number", None),
@@ -1686,6 +2004,7 @@ def main() -> None:
                 verifier_email=user,
                 statement_order=stmt_order,
                 session_meta=session_meta,
+                positions=pdicts,
             )
             xbytes = out.read_bytes()
             st.download_button(
@@ -1714,20 +2033,34 @@ def _schedule_value_for_editor(current: Optional[str]) -> str:
     return "needs_review"
 
 
-def _review_tx_table_rows(right_tx: list[TransactionORM]) -> list[dict[str, Any]]:
+def _review_tx_table_rows(
+    right_tx: list[TransactionORM], *, include_brokerage_cols: bool = False
+) -> list[dict[str, Any]]:
     """Build rows for st.data_editor (insertion order = column order)."""
     rows: list[dict[str, Any]] = []
     for t in right_tx:
         desc = (t.description or "").strip()
         if len(desc) > 200:
             desc = desc[:197] + "…"
-        rows.append(
+        row: dict[str, Any] = {
+            "Date": t.txn_date.isoformat() if t.txn_date else "",
+            "Description": desc,
+            "Payee": _effective_payee(t) or "",
+            "Amount": float(t.amount) if t.amount is not None else None,
+            "Pg": int(t.source_page) if t.source_page is not None else None,
+        }
+        if include_brokerage_cols:
+            row["Activity"] = (t.trade_kind or "").strip() or ""
+            row["Symbol"] = (t.security_symbol or "").strip() or ""
+            row["Qty"] = float(t.quantity) if t.quantity is not None else None
+            row["Price"] = float(t.price) if t.price is not None else None
+            row["Cost basis"] = float(t.cost_basis) if t.cost_basis is not None else None
+            row["Proceeds"] = float(t.proceeds) if t.proceeds is not None else None
+            row["Realized G/L"] = (
+                float(t.realized_gain_loss) if t.realized_gain_loss is not None else None
+            )
+        row.update(
             {
-                "Date": t.txn_date.isoformat() if t.txn_date else "",
-                "Description": desc,
-                "Payee": _effective_payee(t) or "",
-                "Amount": float(t.amount) if t.amount is not None else None,
-                "Pg": int(t.source_page) if t.source_page is not None else None,
                 "Category": _schedule_value_for_editor(t.schedule),
                 "AI conf": (t.confidence or "—").strip() or "—",
                 "Subcategory": t.subcategory or "",
@@ -1737,6 +2070,7 @@ def _review_tx_table_rows(right_tx: list[TransactionORM]) -> list[dict[str, Any]
                 "Excluded": bool(t.excluded),
             }
         )
+        rows.append(row)
     return rows
 
 

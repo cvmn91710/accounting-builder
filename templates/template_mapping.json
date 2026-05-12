@@ -120,6 +120,56 @@
         "balancedIndicatorText": "BALANCED= YES"
       }
     },
+    "brokerageTransactions": {
+      "sheet": "Brokerage Transactions",
+      "_note": "Parallel sheet to Bank Statement Transactions for brokerage / investment accounts. The app creates this sheet on demand when a brokerage statement is exported. One block per brokerage account.",
+      "createIfMissing": true,
+      "block": {
+        "height": 16,
+        "bankNameRowOffset": 0,
+        "columnHeaderRowOffset": 1,
+        "dataStartRowOffset": 2,
+        "dataEndRowOffset": 8,
+        "totalsRowOffset": 10
+      },
+      "firstBlockStartRow": 2,
+      "blockStrideRows": 16,
+      "columns": {
+        "date": "B",
+        "symbol": "C",
+        "description": "D",
+        "trade_kind": "E",
+        "quantity": "F",
+        "price": "G",
+        "cost_basis": "H",
+        "proceeds": "I",
+        "realized_gain_loss": "J",
+        "debit": "K",
+        "credit": "L",
+        "notes": "M"
+      },
+      "columnHeaders": {
+        "date": "Date",
+        "symbol": "Symbol",
+        "description": "Description",
+        "trade_kind": "Activity",
+        "quantity": "Qty",
+        "price": "Price",
+        "cost_basis": "Cost Basis",
+        "proceeds": "Proceeds",
+        "realized_gain_loss": "Realized G/L",
+        "debit": "Debit",
+        "credit": "Credit",
+        "notes": "Notes"
+      },
+      "totalsFormulas": {
+        "debitTotal": "=SUM(K{dataStartRow}:K{dataEndRow})",
+        "creditTotal": "=SUM(L{dataStartRow}:L{dataEndRow})",
+        "realizedGLTotal": "=SUM(J{dataStartRow}:J{dataEndRow})",
+        "totalLabelCell": "D{totalsRow}",
+        "totalLabelText": "TOTALS"
+      }
+    },
     "scheduleB": {
       "sheet": "POH @ Beginning Schedule B",
       "headerCells": {

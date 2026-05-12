@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 MatterType = Literal["conservatorship", "probate_estate", "trust_administration"]
 
@@ -33,6 +33,29 @@ SCHEDULE_UI_OPTIONS: tuple[str, ...] = (
     "internal_transfer",
     "excluded",
 )
+
+# Subset surfaced when reviewing transactions on a brokerage statement.
+# Drops Schedule B/E (those are populated from the holdings tables, not transactions),
+# F (additional property received — typically a manual entry), and I/L/P (trade-or-business
+# / professional-fees scenarios that brokerage activity does not produce).
+SCHEDULE_UI_OPTIONS_BROKERAGE: tuple[str, ...] = (
+    "A",
+    "C",
+    "D",
+    "G",
+    "K",
+    "X",
+    "needs_review",
+    "internal_transfer",
+    "excluded",
+)
+
+
+def schedule_ui_options_for(document_type: Optional[str]) -> tuple[str, ...]:
+    """Return the dropdown option list appropriate for the statement's document type."""
+    if (document_type or "").lower() == "brokerage":
+        return SCHEDULE_UI_OPTIONS_BROKERAGE
+    return SCHEDULE_UI_OPTIONS
 
 # Schedule B in the firm template = POH @ Beginning (not "Gains" — template wins per spec v1.2)
 

@@ -392,6 +392,299 @@ def _apply_working_balance_header(
         )
 
 
+def _classify_position_asset_class(p: dict[str, Any]) -> str:
+    """Best-effort split: explicit asset_class wins; else infer from description."""
+    raw = (p.get("asset_class") or "").strip().lower()
+    if raw in ("cash", "non_cash"):
+        return raw
+    desc = (p.get("security_description") or "").upper()
+    sym = (p.get("security_symbol") or "").upper()
+    cash_signals = ("MONEY MARKET", "CASH", "SWEEP", "SPAXX", "BANK DEPOSIT")
+    if any(sig in desc for sig in cash_signals):
+        return "cash"
+    if not sym and not (p.get("security_description") or "").strip():
+        return "cash"
+    return "non_cash"
+
+
+def _section_data_range_for_positions(section_cfg: dict[str, Any], rows_needed: int) -> tuple[int, int]:
+    """Return (data_start_row, data_end_row), expanding the template's default span when needed."""
+    start = int(section_cfg.get("dataStartRow", 1))
+    end = int(section_cfg.get("dataEndRow", start))
+    capacity = end - start + 1
+    if rows_needed > capacity:
+        end = start + rows_needed - 1
+    return start, end
+
+
+def _write_positions_to_schedule(
+    ws,
+    schedule_cfg: dict[str, Any],
+    positions_for_period: list[dict[str, Any]],
+    *,
+    valued_as_of: Optional[date],
+) -> None:
+    """Populate the cash + non_cash sections of Schedule B or Schedule E from positions."""
+    if not schedule_cfg:
+        return
+    cols = schedule_cfg.get("columns") or {}
+    if not cols:
+        return
+
+    header_cells = schedule_cfg.get("headerCells") or {}
+    if valued_as_of and (cell := header_cells.get("valuedAsOfDate")):
+        _set_cell_by_a1(ws, cell, valued_as_of.isoformat())
+
+    sections = schedule_cfg.get("sections") or {}
+    cash_section = sections.get("cash") or {}
+    non_cash_section = sections.get("nonCash") or {}
+
+    grouped: dict[str, list[dict[str, Any]]] = {"cash": [], "non_cash": []}
+    for p in positions_for_period:
+        grouped[_classify_position_asset_class(p)].append(p)
+
+    def _write_section(section_cfg: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+        if not section_cfg or not rows:
+            return
+        start, end = _section_data_range_for_positions(section_cfg, len(rows))
+        for i, p in enumerate(rows):
+            r = start + i
+            desc_parts = [
+                (p.get("security_symbol") or "").strip(),
+                (p.get("security_description") or "").strip(),
+            ]
+            qty = p.get("quantity")
+            if qty is not None:
+                try:
+                    desc_parts.append(f"({float(qty):g} sh)")
+                except (TypeError, ValueError):
+                    pass
+            description = " ".join(part for part in desc_parts if part).strip()
+            if "description" in cols:
+                _set_cell_value(ws, r, _col(cols["description"]), description)
+            mv = p.get("market_value")
+            if mv is not None and "marketValue" in cols:
+                try:
+                    _set_cell_value(ws, r, _col(cols["marketValue"]), float(mv))
+                except (TypeError, ValueError):
+                    pass
+            cb = p.get("cost_basis")
+            if cb is None:
+                cb = mv  # firm convention: carry value falls back to market value when basis unknown
+            if cb is not None and "carryValue" in cols:
+                try:
+                    _set_cell_value(ws, r, _col(cols["carryValue"]), float(cb))
+                except (TypeError, ValueError):
+                    pass
+
+        totals_cells = section_cfg.get("totalsCells") or {}
+        totals_pattern = section_cfg.get("totalsFormulaPattern") or {}
+        for field, cell in totals_cells.items():
+            pattern = totals_pattern.get(field)
+            if not pattern:
+                continue
+            try:
+                formula = pattern.format(dataStartRow=start, dataEndRow=end)
+                _set_cell_by_a1(ws, cell, formula)
+            except (KeyError, ValueError):
+                continue
+
+    _write_section(cash_section, grouped["cash"])
+    _write_section(non_cash_section, grouped["non_cash"])
+
+
+def _write_schedule_b_e_from_positions(
+    wb,
+    sched_b_cfg: dict[str, Any],
+    sched_e_cfg: dict[str, Any],
+    positions: list[dict[str, Any]],
+    *,
+    statements_order: list[str],
+    statement_by_id: dict[str, dict[str, Any]],
+) -> None:
+    if not positions:
+        return
+    beginning = [p for p in positions if (p.get("as_of") or "").lower() == "beginning"]
+    ending = [p for p in positions if (p.get("as_of") or "").lower() == "ending"]
+
+    period_starts = [
+        statement_by_id.get(sid, {}).get("statement_period_start")
+        for sid in statements_order
+        if statement_by_id.get(sid)
+    ]
+    period_ends = [
+        statement_by_id.get(sid, {}).get("statement_period_end")
+        for sid in statements_order
+        if statement_by_id.get(sid)
+    ]
+    earliest_start = min((d for d in period_starts if d), default=None)
+    latest_end = max((d for d in period_ends if d), default=None)
+
+    if beginning and sched_b_cfg:
+        sheet_name = _resolve_workbook_sheet(wb, sched_b_cfg.get("sheet") or "POH @ Beginning Schedule B")
+        if sheet_name:
+            _write_positions_to_schedule(
+                wb[sheet_name], sched_b_cfg, beginning, valued_as_of=earliest_start
+            )
+    if ending and sched_e_cfg:
+        sheet_name = _resolve_workbook_sheet(wb, sched_e_cfg.get("sheet") or "POH @ End Schedule E")
+        if sheet_name:
+            _write_positions_to_schedule(
+                wb[sheet_name], sched_e_cfg, ending, valued_as_of=latest_end
+            )
+
+
+def _write_brokerage_transactions_sheet(
+    wb,
+    cfg: dict[str, Any],
+    *,
+    statements_order: list[str],
+    statement_by_id: dict[str, dict[str, Any]],
+    transactions: list[dict[str, Any]],
+) -> dict[str, tuple[str, int]]:
+    """Render brokerage trades on a dedicated 'Brokerage Transactions' sheet."""
+    sheet_name = cfg.get("sheet") or "Brokerage Transactions"
+    create_if_missing = bool(cfg.get("createIfMissing", True))
+    resolved = _resolve_workbook_sheet(wb, sheet_name)
+    if not resolved:
+        if not create_if_missing:
+            return {}
+        ws = wb.create_sheet(sheet_name)
+        resolved = sheet_name
+    else:
+        ws = wb[resolved]
+
+    cols = cfg.get("columns") or {
+        "date": "B",
+        "symbol": "C",
+        "description": "D",
+        "trade_kind": "E",
+        "quantity": "F",
+        "price": "G",
+        "cost_basis": "H",
+        "proceeds": "I",
+        "realized_gain_loss": "J",
+        "debit": "K",
+        "credit": "L",
+        "notes": "M",
+    }
+    headers_cfg = cfg.get("columnHeaders") or {}
+    first_block_row = int(cfg.get("firstBlockStartRow", 2))
+    block = cfg.get("block") or {}
+    stride = int(cfg.get("blockStrideRows") or 16)
+    off_name = int(block.get("bankNameRowOffset", 0))
+    off_headers = int(block.get("columnHeaderRowOffset", 1))
+    off_data = int(block.get("dataStartRowOffset", 2))
+    off_data_end = int(block.get("dataEndRowOffset", 8))
+    off_totals = int(block.get("totalsRowOffset", 10))
+    totals_formulas = cfg.get("totalsFormulas") or {}
+
+    written: dict[str, tuple[str, int]] = {}
+    first_data_col = _col(cols.get("date", "B"))
+
+    for block_idx, stmt_id in enumerate(statements_order):
+        st = statement_by_id.get(stmt_id)
+        if not st:
+            continue
+        stmt_tx = [t for t in transactions if t.get("statement_id") == stmt_id]
+        base = first_block_row + block_idx * stride
+        header = " ".join(
+            filter(
+                None,
+                [
+                    st.get("institution") or "",
+                    st.get("account_last4") and f"…{st.get('account_last4')}",
+                ],
+            )
+        ) or "Brokerage Account"
+        _set_cell_value(ws, base + off_name, first_data_col, header)
+        header_row = base + off_headers
+        for key, col_letter in cols.items():
+            label = headers_cfg.get(key) or key.replace("_", " ").title()
+            _set_cell_value(ws, header_row, _col(col_letter), label)
+
+        data_start = base + off_data
+        data_end = base + off_data_end
+        row_ptr = data_start
+        for t in stmt_tx:
+            if row_ptr > data_end:
+                data_end = row_ptr  # expand block when statement has more rows than the template default
+            if "date" in cols and t.get("txn_date") is not None:
+                _set_cell_value(ws, row_ptr, _col(cols["date"]), _txn_date_for_cell(t["txn_date"]))
+            if "symbol" in cols:
+                _set_cell_value(ws, row_ptr, _col(cols["symbol"]), t.get("security_symbol") or "")
+            if "description" in cols:
+                _set_cell_value(ws, row_ptr, _col(cols["description"]), t.get("description") or "")
+            if "trade_kind" in cols:
+                _set_cell_value(ws, row_ptr, _col(cols["trade_kind"]), t.get("trade_kind") or "")
+            for key in ("quantity", "price", "cost_basis", "proceeds", "realized_gain_loss"):
+                val = t.get(key)
+                if val is None or key not in cols:
+                    continue
+                try:
+                    _set_cell_value(ws, row_ptr, _col(cols[key]), float(val))
+                except (TypeError, ValueError):
+                    continue
+            amt = t.get("amount")
+            debit_val = None
+            credit_val = None
+            if amt is not None:
+                try:
+                    v = float(amt)
+                    if v < 0:
+                        debit_val = -v
+                    else:
+                        credit_val = v
+                except (TypeError, ValueError):
+                    pass
+            if "debit" in cols and debit_val is not None:
+                _set_cell_value(ws, row_ptr, _col(cols["debit"]), debit_val)
+            if "credit" in cols and credit_val is not None:
+                _set_cell_value(ws, row_ptr, _col(cols["credit"]), credit_val)
+            if "notes" in cols:
+                _set_cell_value(ws, row_ptr, _col(cols["notes"]), t.get("notes") or "")
+            tid = t.get("id")
+            if tid:
+                written[tid] = (resolved, row_ptr)
+            row_ptr += 1
+
+        actual_end = max(data_start, row_ptr - 1)
+        totals_row = base + off_totals
+        if label_cell := totals_formulas.get("totalLabelCell"):
+            try:
+                _set_cell_by_a1(
+                    ws,
+                    label_cell.format(totalsRow=totals_row),
+                    totals_formulas.get("totalLabelText") or "TOTALS",
+                )
+            except (KeyError, ValueError):
+                pass
+        for key, formula in totals_formulas.items():
+            if key in ("totalLabelCell", "totalLabelText"):
+                continue
+            if not isinstance(formula, str) or "{" not in formula:
+                continue
+            try:
+                expanded = formula.format(
+                    dataStartRow=data_start,
+                    dataEndRow=actual_end,
+                    totalsRow=totals_row,
+                )
+            except (KeyError, ValueError):
+                continue
+            target_col = None
+            if key == "debitTotal":
+                target_col = cols.get("debit")
+            elif key == "creditTotal":
+                target_col = cols.get("credit")
+            elif key == "realizedGLTotal":
+                target_col = cols.get("realized_gain_loss")
+            if target_col:
+                _set_cell_value(ws, totals_row, _col(target_col), expanded)
+
+    return written
+
+
 def _match_subcategory_key(
     label: Optional[str], keys: list[str]
 ) -> Optional[str]:
@@ -417,6 +710,7 @@ def _generate_v12(
     mapping: MasterTemplateMappingV12,
     verifier_email: Optional[str],
     session_meta: dict[str, Any],
+    positions: Optional[list[dict[str, Any]]] = None,
 ) -> Path:
     settings = get_settings()
     raw_tpl = mapping.template_path or str(settings.template_path)
@@ -437,6 +731,18 @@ def _generate_v12(
         _apply_working_balance_header(
             wb[wb_sheet_n], wb_meta, matter_name, period_start, period_end, session_meta
         )
+
+    def _is_brokerage(st: dict[str, Any]) -> bool:
+        return (st.get("document_type") or "").lower() == "brokerage"
+
+    bank_statements = [
+        sid for sid in statements_order
+        if (st := statement_by_id.get(sid)) and not _is_brokerage(st)
+    ]
+    brokerage_statements = [
+        sid for sid in statements_order
+        if (st := statement_by_id.get(sid)) and _is_brokerage(st)
+    ]
 
     bank_cfg = sheets_cfg.get("bankTransactions") or {}
     bank_sheet_n = _resolve_workbook_sheet(
@@ -465,7 +771,7 @@ def _generate_v12(
     if bank_sheet_n:
         ws_bank = wb[bank_sheet_n]
         first_data_col = _col(bank_cols.get("date", "B"))
-        for block_idx, stmt_id in enumerate(statements_order):
+        for block_idx, stmt_id in enumerate(bank_statements):
             st = statement_by_id.get(stmt_id)
             if not st:
                 continue
@@ -556,6 +862,25 @@ def _generate_v12(
                 if tid:
                     written_row[tid] = (bank_sheet_n, row_ptr)
                 row_ptr += 1
+
+    if brokerage_statements:
+        broker_written = _write_brokerage_transactions_sheet(
+            wb,
+            sheets_cfg.get("brokerageTransactions") or {},
+            statements_order=brokerage_statements,
+            statement_by_id=statement_by_id,
+            transactions=transactions,
+        )
+        written_row.update(broker_written)
+
+    _write_schedule_b_e_from_positions(
+        wb,
+        sheets_cfg.get("scheduleB") or {},
+        sheets_cfg.get("scheduleE") or {},
+        positions or [],
+        statements_order=statements_order,
+        statement_by_id=statement_by_id,
+    )
 
     schedule_a = sheets_cfg.get("scheduleA") or {}
     if schedule_a:
@@ -768,6 +1093,19 @@ def _generate_v12(
     return _save_workbook(wb, matter_name, period_start, period_end)
 
 
+def _decimal_to_float(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, Decimal):
+        return float(v)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return v
+
+
 def _append_audit_v12(
     wb,
     transactions: list[dict[str, Any]],
@@ -785,6 +1123,13 @@ def _append_audit_v12(
         "OriginalDescription",
         "NormalizedDescription",
         "Amount",
+        "TradeKind",
+        "Symbol",
+        "Quantity",
+        "Price",
+        "CostBasis",
+        "Proceeds",
+        "RealizedGainLoss",
         "AIScheduleSuggestion",
         "AISubcategorySuggestion",
         "AIConfidence",
@@ -813,12 +1158,6 @@ def _append_audit_v12(
         rin = loc[1] if loc else ""
         sid = t.get("statement_id")
         st = statement_by_id.get(sid, {})
-        amt = t.get("amount")
-        amt_val = (
-            float(amt)
-            if amt is not None and isinstance(amt, (int, float, Decimal))
-            else amt
-        )
         va = t.get("verified_at")
         vals = [
             sched_display,
@@ -828,7 +1167,14 @@ def _append_audit_v12(
             t.get("source_page"),
             t.get("description", ""),
             t.get("normalized_description") or "",
-            amt_val,
+            _decimal_to_float(t.get("amount")),
+            t.get("trade_kind") or "",
+            t.get("security_symbol") or "",
+            _decimal_to_float(t.get("quantity")),
+            _decimal_to_float(t.get("price")),
+            _decimal_to_float(t.get("cost_basis")),
+            _decimal_to_float(t.get("proceeds")),
+            _decimal_to_float(t.get("realized_gain_loss")),
             t.get("schedule"),
             t.get("subcategory"),
             t.get("confidence"),
@@ -865,14 +1211,20 @@ def generate_accounting_workbook(
     verifier_email: Optional[str],
     statement_order: Optional[list[str]] = None,
     session_meta: Optional[dict[str, Any]] = None,
+    positions: Optional[list[dict[str, Any]]] = None,
 ) -> Path:
     """
     Generate Excel export. Uses spec v1.2 mapping when JSON contains `sheets.workingBalance`;
     otherwise legacy flat schedule→sheet mapping.
+
+    positions (optional): holdings rows (period start + end) used to populate Schedule B /
+    Schedule E on brokerage statements. Each row has keys: statement_id, as_of, asset_class,
+    security_symbol, security_description, quantity, unit_price, market_value, cost_basis.
     """
     meta = session_meta or {}
     mapping = load_mapping_any(mapping_path)
     stmt_order = statement_order or list(statement_by_id.keys())
+    positions_list = positions or []
 
     if isinstance(mapping, MasterTemplateMappingV12):
         return _generate_v12(
@@ -885,6 +1237,7 @@ def generate_accounting_workbook(
             mapping=mapping,
             verifier_email=verifier_email,
             session_meta=meta,
+            positions=positions_list,
         )
 
     return _generate_legacy(

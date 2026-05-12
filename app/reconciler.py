@@ -20,11 +20,22 @@ def _d(v: Any) -> Optional[Decimal]:
         return None
 
 
+_REALIZED_GL_TOLERANCE = Decimal("0.05")
+_HOLDINGS_QTY_TOLERANCE = Decimal("0.0001")
+_HOLDINGS_COST_BASIS_TOLERANCE = Decimal("1.00")
+
+
 def run_reconciliation(
     statements: list[dict[str, Any]],
     transactions: list[dict[str, Any]],
+    positions: Optional[list[dict[str, Any]]] = None,
 ) -> list[ReconciliationIssue]:
-    """Deterministic checks. statements: id, account_last4, period_start, period_end, beginning_balance, ending_balance, institution."""
+    """Deterministic checks. statements: id, account_last4, period_start, period_end, beginning_balance, ending_balance, institution.
+
+    positions (optional): list of dicts with keys statement_id, as_of ('beginning'|'ending'),
+    security_symbol, security_description, quantity, cost_basis — used for brokerage-statement
+    carry-forward checks across consecutive statements on the same account.
+    """
     issues: list[ReconciliationIssue] = []
 
     # Index txns by statement
@@ -132,6 +143,168 @@ def run_reconciliation(
                     )
                 )
 
+    # Holdings carry-forward: previous statement's ENDING positions should match
+    # the next statement's BEGINNING positions on the same (institution, account_last4).
+    if positions:
+        issues.extend(_holdings_carry_forward_issues(groups, positions))
+
+    # Realized gain/loss self-consistency: proceeds - cost_basis ~= realized_gain_loss.
+    issues.extend(_realized_gain_loss_issues(transactions))
+
+    return issues
+
+
+def _index_positions(positions: list[dict[str, Any]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Return {(statement_id, as_of): [rows]}."""
+    by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for p in positions:
+        sid = p.get("statement_id")
+        as_of = (p.get("as_of") or "").lower()
+        if not sid or as_of not in ("beginning", "ending"):
+            continue
+        by_key[(sid, as_of)].append(p)
+    return by_key
+
+
+def _position_signature(p: dict[str, Any]) -> str:
+    """Identify a holding by symbol when present, otherwise by description."""
+    sym = (p.get("security_symbol") or "").strip().upper()
+    if sym:
+        return f"sym:{sym}"
+    desc = (p.get("security_description") or "").strip().upper()
+    return f"desc:{desc}" if desc else ""
+
+
+def _holdings_carry_forward_issues(
+    account_groups: dict[str, list[dict[str, Any]]],
+    positions: list[dict[str, Any]],
+) -> list[ReconciliationIssue]:
+    issues: list[ReconciliationIssue] = []
+    idx = _index_positions(positions)
+    for key, stmts in account_groups.items():
+        stmts_sorted = sorted(
+            stmts,
+            key=lambda x: (x.get("statement_period_start") or date.min, x.get("id")),
+        )
+        for prev, nxt in zip(stmts_sorted, stmts_sorted[1:]):
+            prev_end = idx.get((prev.get("id"), "ending")) or []
+            nxt_begin = idx.get((nxt.get("id"), "beginning")) or []
+            if not prev_end or not nxt_begin:
+                continue
+            prev_map = {sig: p for p in prev_end if (sig := _position_signature(p))}
+            next_map = {sig: p for p in nxt_begin if (sig := _position_signature(p))}
+            all_keys = set(prev_map) | set(next_map)
+            for k in sorted(all_keys):
+                a = prev_map.get(k)
+                b = next_map.get(k)
+                if a is None:
+                    issues.append(
+                        ReconciliationIssue(
+                            type=ReconciliationIssueType.holdings_mismatch,
+                            message=(
+                                f"Holding present at start of {nxt.get('id')} but absent "
+                                f"at end of prior statement ({key}, {k})"
+                            ),
+                            meta={
+                                "account_key": key,
+                                "position": k,
+                                "previous_statement_id": prev.get("id"),
+                                "next_statement_id": nxt.get("id"),
+                            },
+                        )
+                    )
+                    continue
+                if b is None:
+                    issues.append(
+                        ReconciliationIssue(
+                            type=ReconciliationIssueType.holdings_mismatch,
+                            message=(
+                                f"Holding present at end of {prev.get('id')} but absent "
+                                f"at start of next statement ({key}, {k})"
+                            ),
+                            meta={
+                                "account_key": key,
+                                "position": k,
+                                "previous_statement_id": prev.get("id"),
+                                "next_statement_id": nxt.get("id"),
+                            },
+                        )
+                    )
+                    continue
+                qa = _d(a.get("quantity"))
+                qb = _d(b.get("quantity"))
+                if qa is not None and qb is not None and abs(qa - qb) > _HOLDINGS_QTY_TOLERANCE:
+                    issues.append(
+                        ReconciliationIssue(
+                            type=ReconciliationIssueType.holdings_mismatch,
+                            message=(
+                                f"Quantity mismatch on {k} ({key}): "
+                                f"end={qa}, next-begin={qb}"
+                            ),
+                            amount_delta=qb - qa,
+                            meta={
+                                "account_key": key,
+                                "position": k,
+                                "previous_statement_id": prev.get("id"),
+                                "next_statement_id": nxt.get("id"),
+                                "field": "quantity",
+                            },
+                        )
+                    )
+                ca = _d(a.get("cost_basis"))
+                cb = _d(b.get("cost_basis"))
+                if ca is not None and cb is not None and abs(ca - cb) > _HOLDINGS_COST_BASIS_TOLERANCE:
+                    issues.append(
+                        ReconciliationIssue(
+                            type=ReconciliationIssueType.holdings_mismatch,
+                            message=(
+                                f"Cost-basis mismatch on {k} ({key}): "
+                                f"end={ca}, next-begin={cb}"
+                            ),
+                            amount_delta=cb - ca,
+                            meta={
+                                "account_key": key,
+                                "position": k,
+                                "previous_statement_id": prev.get("id"),
+                                "next_statement_id": nxt.get("id"),
+                                "field": "cost_basis",
+                            },
+                        )
+                    )
+    return issues
+
+
+def _realized_gain_loss_issues(
+    transactions: list[dict[str, Any]],
+) -> list[ReconciliationIssue]:
+    issues: list[ReconciliationIssue] = []
+    for t in transactions:
+        kind = (t.get("trade_kind") or "").lower()
+        if kind != "sell":
+            continue
+        proceeds = _d(t.get("proceeds"))
+        cost_basis = _d(t.get("cost_basis"))
+        gl = _d(t.get("realized_gain_loss"))
+        if proceeds is None or cost_basis is None or gl is None:
+            continue
+        computed = proceeds - cost_basis
+        if abs(computed - gl) > _REALIZED_GL_TOLERANCE:
+            issues.append(
+                ReconciliationIssue(
+                    type=ReconciliationIssueType.realized_gain_loss_mismatch,
+                    message=(
+                        "Realized gain/loss does not equal proceeds - cost basis "
+                        f"({proceeds} - {cost_basis} = {computed}, statement says {gl})"
+                    ),
+                    transaction_ids=[t.get("id")] if t.get("id") else [],
+                    amount_delta=computed - gl,
+                    meta={
+                        "proceeds": str(proceeds),
+                        "cost_basis": str(cost_basis),
+                        "realized_gain_loss": str(gl),
+                    },
+                )
+            )
     return issues
 
 
